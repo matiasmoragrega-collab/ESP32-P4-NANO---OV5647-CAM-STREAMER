@@ -1,0 +1,6 @@
+/build/
+/build-*/
+/managed_components/
+/frontend/node_modules/
+/sdkconfig
+/sdkconfig.old

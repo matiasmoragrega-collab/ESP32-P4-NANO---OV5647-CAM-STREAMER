@@ -18,7 +18,7 @@ The web interface lets you select the **sensor image format**, JPEG quality, pre
 - Network: on-board IP101 Ethernet PHY and RJ45
 - Video: sensor capture is converted to JPEG and streamed as multipart MJPEG
 
-The firmware is based on Waveshare's `17_simple_video_server` example and Espressif's `esp_video` and OV5647 sensor components. Component versions are pinned in `dependencies.lock`; ESP-IDF downloads managed components during configuration/build.
+The firmware is based on Waveshare's `17_simple_video_server` example and Espressif's `esp_video` and OV5647 sensor components. The component manifest in `main/idf_component.yml` declares the compatible dependencies; ESP-IDF's Component Manager resolves and downloads them during configuration/build.
 
 ## Build and flash
 
@@ -45,4 +45,3 @@ The latest hardware check used **1280 x 960 RAW10 at 45 fps** as the selected se
 - `components/example_video_common/`: board and video helper code
 - `sdkconfig.defaults`: shared ESP32-P4 camera/Ethernet configuration
 - `dependencies.lock`: pinned ESP-IDF component versions
-
