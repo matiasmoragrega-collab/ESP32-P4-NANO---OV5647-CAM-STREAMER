@@ -16,9 +16,19 @@ RAW8 and RAW10 describe the sensor-to-ISP capture format. The browser stream is 
 
 ## Choosing a mode
 
-Start with **1280 x 960** for the widest tested view and least zoomed-in framing. Use the other entries to compare portrait, square, 16:9, and smaller landscape sensor windows. The sensor modes use different readout windows, so their field of view can change; an aspect-ratio change can crop the scene even when the browser preview is shown at the same size.
+Start with **1280 x 960** for the widest tested view and least zoomed-in framing. Use the other entries to compare portrait, square, 16:9, and smaller landscape sensor windows. The modes read different amounts of the sensor (1280 x 960, 800 x 640 and 800 x 800 are 2x2 binned, i.e. 2 sensor pixels per image pixel; 1920 x 1080 and 800 x 1280 are 1:1 crops), so the field of view changes between modes.
 
-The browser scales the returned image to fit the preview. **Preview size, CSS scaling, and preview rotation do not change the sensor's field of view.** If the image looks cropped or off-center, first check the selected sensor format. The available sensor modes are defined by the OV5647 driver's mode tables, not by an arbitrary width/height entered in the GUI.
+**All modes are centred on the lens centre and share one orientation.** The firmware rewrites each mode's readout window (sensor windowing only - no scaling or resampling of the stream) so the image centre lands on the stored lens centre, and every mode uses the 1280 x 960 mirror/flip setting. A point at the lens centre therefore stays at the image centre when switching modes; only the crop changes. The lens centre defaults to the centre of the sensor's active area and can be calibrated; 1280 x 960 uses almost the whole sensor and can only follow the lens centre by +-16 px horizontally / +-12 px vertically. Window tables, the coordinate system and the calibration procedure are in [lens-calibration.md](lens-calibration.md).
+
+| Mode | Sensor pixels per image pixel | Sensor area read (default centre) |
+|---|---:|---|
+| 800 x 1280 | 1 | 800 x 1280 |
+| 800 x 640 | 2 | 1600 x 1280 |
+| 800 x 800 | 2 | 1600 x 1600 |
+| 1920 x 1080 | 1 | 1920 x 1080 |
+| 1280 x 960 | 2 | 2560 x 1920 |
+
+The browser scales the returned image to fit the preview. **Preview size, CSS scaling, and preview rotation do not change the sensor's field of view.** The available sensor modes are defined by the OV5647 driver's mode tables, not by an arbitrary width/height entered in the GUI.
 
 ## Switching while streaming
 

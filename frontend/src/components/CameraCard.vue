@@ -4,10 +4,13 @@
       <v-img :src="imgSrc" :aspect-ratio="cameraAspectRatio" cover class="camera-preview-image"
         :style="previewImageStyle" :id="`cam-${props.camNum}-v-img`" crossorigin="anonymous" @error="onImageError"
         @load="previewImageFailed = false">
+        <UndistortCanvas v-if="undistortParams" :get-source="getLivePreviewImage" :params="undistortParams"
+          @error="onUndistortError" />
         <div v-if="overlayUrl && overlayVisible" class="camera-overlay-layer">
           <img :src="overlayUrl" class="camera-overlay-image" :style="overlayImageStyle" alt="" aria-hidden="true"
             draggable="false" />
         </div>
+        <LensGuidesOverlay v-if="lensGuideGeometry" :geometry="lensGuideGeometry" :rotation="previewRotation" />
         <AlignmentOverlay v-if="alignmentVisible" v-model:selected-id="selectedLineId" :lines="alignmentLines"
           :drawing="alignmentDrawMode" :rotation="previewRotation" @add="addAlignmentLine"
           @delete-selected="deleteSelectedLine" />
@@ -31,6 +34,7 @@
           </div>
         </template>
       </v-img>
+      <div v-if="undistortParams" class="camera-preview-badge">Undistorted view · display only</div>
     </div>
     <div class="d-flex flex-wrap justify-space-between align-center ga-2 my-2 mx-3">
       <div>
@@ -139,6 +143,14 @@
       </div>
     </div>
     <v-divider />
+
+    <template v-if="lensCamera">
+      <LensCalibrationPanel :camera="lensCamera" :open="settingsOpen" :webgl-available="webglAvailable"
+        :undistort-error="undistortError" v-model:draft="lensDraft" v-model:crosshair="guideCrosshair"
+        v-model:rings="guideRings" v-model:grid="guideGrid" v-model:undistort="undistortEnabled"
+        @request-start="onLensRequestStart" @request-end="onLensRequestEnd" />
+      <v-divider />
+    </template>
 
     <div class="pa-4">
       <div class="text-overline">Overlay image</div>
@@ -258,8 +270,15 @@ import {
   overlayTransformCss, wrapRotation,
 } from '@/composables/useOverlayImage';
 import { capturePreview } from '@/composables/usePreviewCapture';
+import { useLensGuides } from '@/composables/useLensGuides';
 import type { Point } from '@/utils/previewGeometry';
+import { buildLensGuides, isValidDistortion, type LensModel } from '@/utils/lensModel';
+import { isWebGlSupported, type UndistortParams } from '@/utils/undistortRenderer';
+import type { Camera, LensCalibration, SensorInfo, SensorWindow } from '@/camera';
 import AlignmentOverlay from '@/components/AlignmentOverlay.vue';
+import LensCalibrationPanel from '@/components/LensCalibrationPanel.vue';
+import LensGuidesOverlay from '@/components/LensGuidesOverlay.vue';
+import UndistortCanvas from '@/components/UndistortCanvas.vue';
 import OverlayMoveSurface from '@/components/OverlayMoveSurface.vue';
 import SliderField from '@/components/SliderField.vue';
 
@@ -426,6 +445,68 @@ const onOverlayFileChange = (event: Event) => {
   void setOverlayFile(file)
 }
 
+// ---- Lens centre / guides / undistorted view (newer firmware only) ----
+
+type LensCamera = Camera & { sensor: SensorInfo, lensCalibration: LensCalibration, window: SensorWindow }
+/** The camera, if its firmware reports sensor geometry + lens calibration (otherwise the lens UI is hidden). */
+const lensCamera = computed<LensCamera | null>(() => {
+  const cam = camera.value
+  return cam.sensor && cam.lensCalibration && cam.window ? cam as LensCamera : null
+})
+const {
+  crosshair: guideCrosshair, rings: guideRings, grid: guideGrid, undistort: undistortEnabled,
+} = useLensGuides(camera.value.index)
+/** Pending (unapplied) lens model from the settings panel, previewed while the panel is open. */
+const lensDraft = ref<LensModel | null>(null)
+const webglAvailable = isWebGlSupported()
+const undistortError = ref<string>('')
+
+/** Lens model the guides / undistorted view use: the pending one while the panel is open, else the applied one. */
+const effectiveLensModel = computed<LensModel | null>(() => {
+  const cam = lensCamera.value
+  if (!cam) return null
+  if (settingsOpen.value && lensDraft.value) return lensDraft.value
+  return { center: cam.lensCalibration.center, distortion: cam.lensCalibration.distortion }
+})
+
+const undistortParams = computed<UndistortParams | null>(() => {
+  const cam = lensCamera.value
+  const model = effectiveLensModel.value
+  if (!undistortEnabled.value || !webglAvailable || !cam || !model || !isValidDistortion(model.distortion)) return null
+  return { window: cam.window, center: model.center, distortion: model.distortion }
+})
+
+const lensGuideGeometry = computed(() => {
+  const cam = lensCamera.value
+  const model = effectiveLensModel.value
+  if (!cam || !model || !(guideCrosshair.value || guideRings.value || guideGrid.value)) return null
+  const geometry = buildLensGuides(cam.window, model, {
+    crosshair: guideCrosshair.value,
+    rings: guideRings.value,
+    grid: guideGrid.value,
+    applyDistortion: !undistortParams.value,
+  })
+  return geometry.center || geometry.rings.length || geometry.grid.length ? geometry : null
+})
+
+const onUndistortError = (message: string) => {
+  undistortError.value = message
+  undistortEnabled.value = false
+}
+watch(undistortEnabled, (on) => {
+  if (on) undistortError.value = ''
+})
+
+const onLensRequestStart = () => {
+  imgSrc.value = LOADING_IMAGE_SRC
+}
+
+const onLensRequestEnd = (ok: boolean, message: string) => {
+  showSnackbar(ok ? message : 'Failed to update lens calibration', ok ? 'success' : 'error')
+  // Applying restarts the camera stream (like a format change).
+  reloadCameraSrc()
+}
+
 const selectedFormat = computed(() => {
   return camera.value.imageFormats.find(format => format.id === selectedImageFormatId.value)
 })
@@ -559,6 +640,8 @@ const downloadPreview = async () => {
       rotation: previewRotation.value,
       displayWidth: previewElement?.offsetWidth ?? 0,
       lines: alignmentVisible.value ? alignmentLines.value : [],
+      guides: lensGuideGeometry.value,
+      undistort: undistortParams.value,
       overlay: overlayUrl.value && overlayVisible.value
         ? {
           url: overlayUrl.value,
@@ -667,6 +750,20 @@ onUnmounted(() => {
   max-height: none;
   transform: translate(-50%, -50%) rotate(var(--preview-rotation));
   transform-origin: center;
+}
+
+/* Not rotated with the picture; not part of downloads. */
+.camera-preview-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #00e5ff;
+  font-size: 12px;
+  pointer-events: none;
 }
 
 /*

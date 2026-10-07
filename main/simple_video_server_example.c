@@ -5,6 +5,7 @@
  */
 
 #include <string.h>
+#include <math.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -32,6 +33,7 @@
 #include "esp_video_device_common.h"
 #include "esp_video_device_internal.h"
 #include "example_video_common.h"
+#include "lens_calibration.h"
 
 #define EXAMPLE_CAMERA_VIDEO_BUFFER_NUMBER  CONFIG_EXAMPLE_CAMERA_VIDEO_BUFFER_NUMBER
 
@@ -92,6 +94,8 @@ typedef struct web_cam_video {
     uint8_t image_control_values_valid;
 
     SemaphoreHandle_t sem;
+
+    lens_window_t applied_window;   /* lens-centred window of the active mode */
 
     uint32_t support_control_jpeg_quality   : 1;
 } web_cam_video_t;
@@ -333,6 +337,50 @@ static int current_capture_format_index(web_cam_video_t *video)
     return -1;
 }
 
+/* Lens-centred windows apply to the MIPI-CSI OV5647 only. */
+static bool camera_lens_windows_supported(web_cam_video_t *video)
+{
+    if (!video || !video->dev_name || strcmp(video->dev_name, ESP_VIDEO_MIPI_CSI_DEVICE_NAME) != 0) {
+        return false;
+    }
+    esp_video_cam_t camera = {0};
+    if (esp_video_device_common_get_video_cam(CSI_NAME, &camera) != ESP_OK || !camera.sensor) {
+        return false;
+    }
+    return lens_sensor_supported(camera.sensor->name);
+}
+
+/*
+ * Apply a sensor mode with its readout window re-centred on the stored lens
+ * centre. The rewritten format lives in static storage owned by
+ * lens_calibration.c because the driver keeps the pointer as its current
+ * format. Falls back to the stock table for sensors we do not handle.
+ */
+static esp_err_t apply_lens_centred_sensor_format(web_cam_video_t *video, const esp_cam_sensor_format_t *base)
+{
+    const esp_cam_sensor_format_t *to_apply = base;
+
+    memset(&video->applied_window, 0, sizeof(video->applied_window));
+    if (camera_lens_windows_supported(video)) {
+        esp_cam_sensor_format_t current = {0};
+        const void *in_use_regs = NULL;
+        if (ioctl(video->fd, VIDIOC_G_SENSOR_FMT, &current) == 0) {
+            in_use_regs = current.regs;
+        }
+        lens_window_t win;
+        const esp_cam_sensor_format_t *built = lens_window_build_format(base, lens_calib_get(), in_use_regs, &win);
+        if (built) {
+            to_apply = built;
+            video->applied_window = win;
+        } else {
+            ESP_LOGW(TAG, "video%d: cannot lens-centre %ux%u; using the stock window", video->index,
+                     base->width, base->height);
+        }
+    }
+
+    return ioctl(video->fd, VIDIOC_S_SENSOR_FMT, to_apply);
+}
+
 static esp_err_t decode_request(web_cam_t *web_cam, httpd_req_t *req, request_desc_t *desc)
 {
     esp_err_t ret;
@@ -469,6 +517,20 @@ static char *get_cameras_json(web_cam_t *web_cam)
         cJSON_AddNumberToObject(current_resolution, "height", web_cam->video[i].height);
         cJSON_AddItemToObject(camera, "currentResolution", current_resolution);
 
+        bool lens_windows = camera_lens_windows_supported(&web_cam->video[i]);
+        if (lens_windows) {
+            cJSON_AddItemToObject(camera, "sensor", lens_sensor_json());
+            cJSON_AddItemToObject(camera, "lensCalibration", lens_calibration_json(lens_calib_get()));
+            lens_window_t current_window = web_cam->video[i].applied_window;
+            if (!current_window.valid && current_format_index >= 0) {
+                struct v4l2_sensor_format_enum sensor_enum = { .index = (uint32_t)current_format_index };
+                if (ioctl(web_cam->video[i].fd, VIDIOC_ENUM_SENSOR_FMT, &sensor_enum) == 0) {
+                    lens_window_compute(&sensor_enum.format, lens_calib_get(), &current_window);
+                }
+            }
+            cJSON_AddItemToObject(camera, "window", lens_window_json(&current_window));
+        }
+
         cJSON *image_formats = cJSON_CreateArray();
         for (uint32_t format_index = 0; ; format_index++) {
             struct v4l2_sensor_format_enum sensor_enum = { .index = format_index };
@@ -491,6 +553,11 @@ static char *get_cameras_json(web_cam_t *web_cam)
                 cJSON_AddNumberToObject(image_format_quality, "step", 1);
                 cJSON_AddNumberToObject(image_format_quality, "default", EXAMPLE_JPEG_ENC_QUALITY);
                 cJSON_AddItemToObject(image_format, "quality", image_format_quality);
+            }
+            if (lens_windows) {
+                lens_window_t format_window;
+                lens_window_compute(sensor_format, lens_calib_get(), &format_window);
+                cJSON_AddItemToObject(image_format, "window", lens_window_json(&format_window));
             }
             cJSON_AddItemToArray(image_formats, image_format);
         }
@@ -636,6 +703,191 @@ fail0:
         free(content);
     }
     return ret;
+}
+
+/* Re-apply JPEG quality and the cached image controls after a mode re-apply
+ * (the sensor driver resets e.g. the AE target when it loads a mode). */
+static void restore_camera_user_settings(web_cam_video_t *video, uint8_t jpeg_quality)
+{
+    if (set_camera_jpeg_quality(video, jpeg_quality) != ESP_OK) {
+        ESP_LOGW(TAG, "video%d: failed to restore JPEG quality", video->index);
+    }
+    for (size_t i = 0; i < sizeof(s_camera_image_controls) / sizeof(s_camera_image_controls[0]); i++) {
+        if (!(video->image_control_values_valid & (1U << i))) {
+            continue;
+        }
+        int fd;
+        struct v4l2_query_ext_ctrl qctrl;
+        if (!query_camera_image_control(video, &s_camera_image_controls[i], &fd, &qctrl)) {
+            continue;
+        }
+        struct v4l2_ext_control control = { .id = s_camera_image_controls[i].id,
+                                            .value = video->image_control_values[i] };
+        struct v4l2_ext_controls controls = { .ctrl_class = V4L2_CID_USER_CLASS, .count = 1, .controls = &control };
+        if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &controls) != 0) {
+            ESP_LOGW(TAG, "video%d: failed to restore %s", video->index, s_camera_image_controls[i].key);
+        }
+    }
+}
+
+static bool json_get_finite(const cJSON *obj, const char *key, double *out)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble)) {
+        return false;
+    }
+    *out = item->valuedouble;
+    return true;
+}
+
+/*
+ * POST /api/set_lens_calibration
+ *   {"index":0, "center":{"x":num,"y":num}, "distortion": null | {fx,fy,k1,k2,p1,p2,k3}}
+ *   {"index":0, "reset":true}
+ * Validates, re-applies the current sensor mode with the new window (same
+ * stream stop/restart path as a format change) and then saves to NVS.
+ */
+static esp_err_t lens_calibration_handler(httpd_req_t *req)
+{
+    web_cam_t *web_cam = (web_cam_t *)req->user_ctx;
+    const char *error = NULL;
+    int status_500 = 0;
+    cJSON *root = NULL;
+    char *content = NULL;
+
+    if (req->content_len == 0 || req->content_len > 2048) {
+        error = "invalid request body size";
+        goto done;
+    }
+    content = calloc(1, req->content_len + 1);
+    if (!content) {
+        httpd_resp_send_500(req);
+        return ESP_ERR_NO_MEM;
+    }
+    size_t received = 0;
+    while (received < req->content_len) {
+        int r = httpd_req_recv(req, content + received, req->content_len - received);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (r <= 0) {
+            free(content);
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+
+    root = cJSON_Parse(content);
+    if (!root || !cJSON_IsObject(root)) {
+        error = "invalid JSON";
+        goto done;
+    }
+
+    const cJSON *json_index = cJSON_GetObjectItemCaseSensitive(root, "index");
+    if (!cJSON_IsNumber(json_index)) {
+        error = "missing or invalid index";
+        goto done;
+    }
+    int index = json_index->valueint;
+    if (index < 0 || index >= web_cam->video_count || !is_valid_web_cam(&web_cam->video[index])) {
+        error = "invalid camera index";
+        goto done;
+    }
+    web_cam_video_t *video = &web_cam->video[index];
+    if (!camera_lens_windows_supported(video)) {
+        error = "lens calibration is not supported for this camera";
+        goto done;
+    }
+
+    lens_calibration_t cal;
+    const cJSON *json_reset = cJSON_GetObjectItemCaseSensitive(root, "reset");
+    if (json_reset && !cJSON_IsBool(json_reset)) {
+        error = "reset must be a boolean";
+        goto done;
+    }
+    if (cJSON_IsTrue(json_reset)) {
+        lens_calib_get_default(&cal);
+    } else {
+        const cJSON *center = cJSON_GetObjectItemCaseSensitive(root, "center");
+        if (!cJSON_IsObject(center) || !json_get_finite(center, "x", &cal.cx) || !json_get_finite(center, "y", &cal.cy)) {
+            error = "center must be an object with finite numbers x and y";
+            goto done;
+        }
+        if (cal.cx < LENS_SENSOR_ACTIVE_X || cal.cx > LENS_SENSOR_ACTIVE_X + LENS_SENSOR_ACTIVE_WIDTH ||
+                cal.cy < LENS_SENSOR_ACTIVE_Y || cal.cy > LENS_SENSOR_ACTIVE_Y + LENS_SENSOR_ACTIVE_HEIGHT) {
+            error = "center is outside the sensor active area (x 16..2608, y 6..1950)";
+            goto done;
+        }
+        cal.calibrated = true;
+        cal.has_distortion = false;
+        memset(&cal.distortion, 0, sizeof(cal.distortion));
+        const cJSON *dist = cJSON_GetObjectItemCaseSensitive(root, "distortion");
+        if (dist && !cJSON_IsNull(dist)) {
+            lens_distortion_t *d = &cal.distortion;
+            if (!cJSON_IsObject(dist) ||
+                    !json_get_finite(dist, "fx", &d->fx) || !json_get_finite(dist, "fy", &d->fy) ||
+                    !json_get_finite(dist, "k1", &d->k1) || !json_get_finite(dist, "k2", &d->k2) ||
+                    !json_get_finite(dist, "p1", &d->p1) || !json_get_finite(dist, "p2", &d->p2) ||
+                    !json_get_finite(dist, "k3", &d->k3)) {
+                error = "distortion must be null or an object with finite numbers fx, fy, k1, k2, p1, p2, k3";
+                goto done;
+            }
+            if (d->fx <= 0 || d->fy <= 0) {
+                error = "distortion fx and fy must be positive";
+                goto done;
+            }
+            cal.has_distortion = true;
+        }
+    }
+
+    int format_index = current_capture_format_index(video);
+    if (format_index < 0) {
+        error = "current sensor mode is unknown";
+        status_500 = 1;
+        goto done;
+    }
+
+    lens_calibration_t previous = *lens_calib_get();
+    uint8_t saved_quality = video->jpeg_quality;
+    lens_calib_set(&cal);
+    esp_err_t ret = reconfigure_video_format(video, format_index);
+    if (ret == ESP_OK) {
+        /* Re-applying the mode resets the sensor; keep the user's settings. */
+        restore_camera_user_settings(video, saved_quality);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "video%d: failed to apply lens calibration (%s); reverting", index, esp_err_to_name(ret));
+        lens_calib_set(&previous);
+        if (is_valid_web_cam(video) && reconfigure_video_format(video, format_index) != ESP_OK) {
+            ESP_LOGE(TAG, "video%d: failed to restore previous lens window", index);
+        }
+        error = "failed to apply the new sensor window";
+        status_500 = 1;
+        goto done;
+    }
+    if (lens_calib_save() != ESP_OK) {
+        error = "window applied but saving to NVS failed";
+        status_500 = 1;
+        goto done;
+    }
+    ESP_LOGI(TAG, "video%d: lens centre set to (%.2f, %.2f) [%s], window error (%.1f, %.1f)", index,
+             cal.cx, cal.cy, cal.calibrated ? "calibrated" : "default",
+             video->applied_window.err_x, video->applied_window.err_y);
+
+done:
+    if (root) {
+        cJSON_Delete(root);
+    }
+    if (content) {
+        free(content);
+    }
+    if (error) {
+        ESP_LOGW(TAG, "set_lens_calibration: %s", error);
+        httpd_resp_send_err(req, status_500 ? HTTPD_500_INTERNAL_SERVER_ERROR : HTTPD_400_BAD_REQUEST, error);
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
 }
 
 static esp_err_t static_file_handler(httpd_req_t *req)
@@ -845,11 +1097,19 @@ static esp_err_t init_web_cam_video(web_cam_video_t *video, const web_cam_video_
     video->fd = open(config->dev_name, O_RDWR);
     ESP_GOTO_ON_FALSE(video->fd >= 0, ESP_ERR_NOT_FOUND, fail, TAG, "Open video device %s failed", config->dev_name);
 
+    if (sensor_format_index < 0 && camera_lens_windows_supported(video)) {
+        /* Boot: re-apply the driver's default mode so its window is lens-centred too. */
+        esp_cam_sensor_format_t current = {0};
+        if (ioctl(video->fd, VIDIOC_G_SENSOR_FMT, &current) == 0) {
+            sensor_format_index = find_sensor_format_index(video, &current);
+        }
+    }
+
     if (sensor_format_index >= 0) {
         struct v4l2_sensor_format_enum sensor_enum = { .index = (uint32_t)sensor_format_index };
         ESP_GOTO_ON_ERROR(ioctl(video->fd, VIDIOC_ENUM_SENSOR_FMT, &sensor_enum), fail, TAG,
                           "unsupported sensor format index %d", sensor_format_index);
-        ESP_GOTO_ON_ERROR(ioctl(video->fd, VIDIOC_S_SENSOR_FMT, &sensor_enum.format), fail, TAG,
+        ESP_GOTO_ON_ERROR(apply_lens_centred_sensor_format(video, &sensor_enum.format), fail, TAG,
                           "failed to switch sensor format to %ux%u", sensor_enum.format.width, sensor_enum.format.height);
 
         format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -1180,6 +1440,13 @@ static esp_err_t http_server_init(web_cam_t *web_cam)
         .user_ctx = (void *)web_cam
     };
 
+    httpd_uri_t lens_calibration_uri = {
+        .uri = "/api/set_lens_calibration",
+        .method = HTTP_POST,
+        .handler = lens_calibration_handler,
+        .user_ctx = (void *)web_cam
+    };
+
     config.stack_size = 1024 * 6;
     ESP_LOGI(TAG, "Starting stream server on port: '%d'", config.server_port);
     ESP_RETURN_ON_ERROR(httpd_start(&control_httpd, &config), TAG, "failed to start control server");
@@ -1188,6 +1455,7 @@ static esp_err_t http_server_init(web_cam_t *web_cam)
     httpd_register_uri_handler(control_httpd, &capture_binary_uri);
     httpd_register_uri_handler(control_httpd, &camera_info_uri);
     httpd_register_uri_handler(control_httpd, &camera_settings_uri);
+    httpd_register_uri_handler(control_httpd, &lens_calibration_uri);
 
     /* Register wildcard static file handler to catch all other requests */
     httpd_register_uri_handler(control_httpd, &static_file_uri);
@@ -1248,6 +1516,7 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         ESP_ERROR_CHECK(nvs_flash_init());
     }
+    lens_calib_init();
 
     /*For camera devices that require the host to provide XCLK, the video_init() must be called immediately after the device is restarted,
     otherwise the camera device may not be able to start due to the lack of the main clock.*/

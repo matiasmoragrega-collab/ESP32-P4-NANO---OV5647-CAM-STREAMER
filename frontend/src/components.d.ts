@@ -9,9 +9,12 @@ declare module 'vue' {
   export interface GlobalComponents {
     AlignmentOverlay: typeof import('./components/AlignmentOverlay.vue')['default']
     CameraCard: typeof import('./components/CameraCard.vue')['default']
+    LensCalibrationPanel: typeof import('./components/LensCalibrationPanel.vue')['default']
+    LensGuidesOverlay: typeof import('./components/LensGuidesOverlay.vue')['default']
     OverlayMoveSurface: typeof import('./components/OverlayMoveSurface.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SliderField: typeof import('./components/SliderField.vue')['default']
+    UndistortCanvas: typeof import('./components/UndistortCanvas.vue')['default']
   }
 }
