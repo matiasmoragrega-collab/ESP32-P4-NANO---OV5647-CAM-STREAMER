@@ -8,6 +8,25 @@ export const OVERLAY_FIT_OPTIONS: { title: string, value: OverlayFit }[] = [
   { title: 'Contain (keep aspect ratio)', value: 'contain' },
 ]
 
+/** Where the overlay image comes from: nothing, one of the built-in images, or the user's uploaded image. */
+export type OverlaySource = 'none' | 'master' | 'blank' | 'custom'
+
+/** Built-in overlays, served as-is from `public/overlays/` (same origin, so they never taint a canvas). */
+const BUILTIN_OVERLAYS: Record<'master' | 'blank', { title: string, url: string }> = {
+  master: { title: 'Master overlay', url: '/overlays/Master_overlay.png' },
+  blank: { title: 'Blank overlay', url: '/overlays/Blank_overlay.png' },
+}
+
+export const OVERLAY_SOURCE_OPTIONS: { title: string, value: OverlaySource }[] = [
+  { title: 'None', value: 'none' },
+  { title: BUILTIN_OVERLAYS.master.title, value: 'master' },
+  { title: BUILTIN_OVERLAYS.blank.title, value: 'blank' },
+  { title: 'Custom image…', value: 'custom' },
+]
+
+const isOverlaySource = (value: unknown): value is OverlaySource =>
+  OVERLAY_SOURCE_OPTIONS.some(option => option.value === value)
+
 export const OVERLAY_MAX_BYTES = 10 * 1024 * 1024
 const DEFAULT_OPACITY = 50
 
@@ -185,19 +204,36 @@ const canDecodeImage = (url: string) => new Promise<boolean>((resolve) => {
 })
 
 /**
- * Per-camera client-side overlay image shown on top of the preview.
- * The image itself is persisted in IndexedDB (too large for localStorage);
- * opacity / visibility / fit mode / transform are persisted in localStorage.
+ * Per-camera client-side overlay image shown on top of the preview: a built-in image or the user's own.
+ * The uploaded image is persisted in IndexedDB (too large for localStorage) and kept while another
+ * source is selected; the source / opacity / visibility / fit mode / transform are persisted in
+ * localStorage and shared by all sources.
  */
 export const useOverlayImage = (cameraIndex: string | number) => {
   const dbKey = `camera-${cameraIndex}`
+  const sourceStorageKey = `camera-${cameraIndex}-overlay-source`
   const opacityStorageKey = `camera-${cameraIndex}-overlay-opacity`
   const visibleStorageKey = `camera-${cameraIndex}-overlay-visible`
   const fitStorageKey = `camera-${cameraIndex}-overlay-fit`
   const transformStorageKey = `camera-${cameraIndex}-overlay-transform`
 
-  const url = ref<string | null>(null)
+  const storedSource = readStorage(sourceStorageKey)
+  // No (valid) saved choice yet: 'none', unless an uploaded image already exists (see loadStored).
+  const hasStoredSource = isOverlaySource(storedSource)
+  const source = ref<OverlaySource>(hasStoredSource ? storedSource : 'none')
+  /** Object URL of the uploaded (custom) image, if any. */
+  const customUrl = ref<string | null>(null)
+  /** File name of the uploaded image. */
   const name = ref<string>('')
+  /** Built-in image URL that failed to load (cleared when it is selected again). */
+  const failedBuiltinUrl = ref<string | null>(null)
+  /** URL of the active overlay image, or null when there is none. */
+  const url = computed<string | null>(() => {
+    if (source.value === 'custom') return customUrl.value
+    if (source.value === 'none') return null
+    const builtinUrl = BUILTIN_OVERLAYS[source.value].url
+    return builtinUrl === failedBuiltinUrl.value ? null : builtinUrl
+  })
   /** Opacity in percent (0..100). */
   const opacity = ref<number>(parseOpacity(readStorage(opacityStorageKey)))
   const visible = ref<boolean>(readStorage(visibleStorageKey) !== 'false')
@@ -211,13 +247,43 @@ export const useOverlayImage = (cameraIndex: string | number) => {
 
   // Bumped on every local change so a slow initial IndexedDB load can't overwrite a newer choice.
   let generation = 0
+  // Set once the source was chosen by the user, so the initial load doesn't switch it to 'custom'.
+  let sourceChosen = hasStoredSource
   let disposed = false
 
   const setObjectUrl = (blob: Blob | null) => {
-    if (url.value) URL.revokeObjectURL(url.value)
-    url.value = blob ? URL.createObjectURL(blob) : null
+    if (customUrl.value) URL.revokeObjectURL(customUrl.value)
+    customUrl.value = blob ? URL.createObjectURL(blob) : null
   }
 
+  /** Checks that the selected built-in image loads; shows an error (and no overlay) if it doesn't. */
+  const checkBuiltin = async (value: OverlaySource) => {
+    if (value === 'none' || value === 'custom') return
+    const { title, url: builtinUrl } = BUILTIN_OVERLAYS[value]
+    const ok = await canDecodeImage(builtinUrl)
+    if (disposed || source.value !== value) return
+    if (ok) {
+      if (failedBuiltinUrl.value === builtinUrl) failedBuiltinUrl.value = null
+    } else {
+      failedBuiltinUrl.value = builtinUrl
+      error.value = `The built-in "${title}" image could not be loaded.`
+    }
+  }
+
+  /** Selects the overlay source; the uploaded image stays stored when switching away from 'custom'. */
+  const setSource = (value: OverlaySource) => {
+    if (!isOverlaySource(value)) return
+    sourceChosen = true
+    error.value = ''
+    failedBuiltinUrl.value = null
+    if (value !== 'none' && value !== source.value) visible.value = true
+    source.value = value
+  }
+
+  watch(source, (value) => {
+    writeStorage(sourceStorageKey, value)
+    void checkBuiltin(value)
+  }, { immediate: hasStoredSource })
   watch(opacity, value => writeStorage(opacityStorageKey, String(value)))
   watch(visible, value => writeStorage(visibleStorageKey, String(value)))
   watch(fit, value => writeStorage(fitStorageKey, value))
@@ -244,6 +310,11 @@ export const useOverlayImage = (cameraIndex: string | number) => {
       if (disposed || startGeneration !== generation || !stored || !(stored.blob instanceof Blob)) return
       setObjectUrl(stored.blob)
       name.value = typeof stored.name === 'string' ? stored.name : ''
+      // Migration: an image uploaded before overlay sources existed stays selected.
+      if (!sourceChosen) {
+        sourceChosen = true
+        source.value = 'custom'
+      }
     } catch {
       // IndexedDB unavailable: the overlay just won't persist across reloads.
     }
@@ -277,6 +348,8 @@ export const useOverlayImage = (cameraIndex: string | number) => {
 
     setObjectUrl(file)
     name.value = file.name
+    sourceChosen = true
+    source.value = 'custom'
     visible.value = true
     persistWarning.value = ''
     try {
@@ -310,8 +383,11 @@ export const useOverlayImage = (cameraIndex: string | number) => {
   void loadStored()
 
   return {
+    source,
+    setSource,
     url,
     name,
+    hasCustomImage: computed(() => customUrl.value !== null),
     opacity,
     visible,
     fit,

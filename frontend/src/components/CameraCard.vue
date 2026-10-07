@@ -120,23 +120,14 @@
       <div v-if="camera.supportsAutoBrightness" class="text-caption text-medium-emphasis mb-3">
         Automatically adjusts the camera brightness as scene lighting changes.
       </div>
-      <v-slider v-model="selectedQuality" v-if="selectedFormat?.quality" :min="selectedFormat?.quality.min ?? 80"
+      <SliderField v-model="selectedQuality" v-if="selectedFormat?.quality" :min="selectedFormat?.quality.min ?? 80"
         :max="selectedFormat?.quality.max ?? 95" :step="selectedFormat?.quality.step ?? 1" :disabled="settingsSaving"
-        label="Quality">
-        <template #append>
-          {{ selectedQuality }}
-        </template>
-      </v-slider>
+        label="Quality" label-width="5.5em" class="mb-3" />
       <div v-else class="text-center mb-4">This image format may not support quality settings</div>
-      <div v-for="control in camera.imageControls ?? []" :key="control.key">
-        <v-slider :model-value="selectedImageControls[control.key] ?? control.value" :min="control.min"
-          :max="control.max" :step="control.step" :disabled="settingsSaving" :label="control.label"
-          @update:model-value="setImageControl(control.key, $event)">
-          <template #append>
-            {{ selectedImageControls[control.key] ?? control.value }}
-          </template>
-        </v-slider>
-      </div>
+      <SliderField v-for="control in camera.imageControls ?? []" :key="control.key"
+        :model-value="selectedImageControls[control.key] ?? control.value" :min="control.min" :max="control.max"
+        :step="control.step" :disabled="settingsSaving" :label="control.label" label-width="5.5em" class="mb-3"
+        @update:model-value="setImageControl(control.key, $event)" />
       <div class="d-flex ga-2">
         <v-btn variant="tonal" color="primary" class="flex-grow-1" @click="saveSettings"
           :loading="settingsSaving">Save</v-btn>
@@ -152,21 +143,25 @@
     <div class="pa-4">
       <div class="text-overline">Overlay image</div>
       <div class="text-caption text-medium-emphasis mb-3">
-        Shown over the camera picture, under the alignment lines. Kept in this browser only; changes apply
-        immediately.
+        Shown over the camera picture, under the alignment lines. Settings and custom images are kept in this
+        browser only; changes apply immediately.
       </div>
-      <input ref="overlayFileInput" type="file" accept="image/*" class="d-none" @change="onOverlayFileChange" />
-      <div class="d-flex ga-2 mb-2">
-        <v-btn variant="tonal" class="flex-grow-1" :prepend-icon="mdiImagePlusOutline" :loading="overlayBusy"
-          @click="overlayFileInput?.click()">
-          {{ overlayHasImage ? 'Replace image' : 'Choose image' }}
-        </v-btn>
-        <v-btn v-if="overlayHasImage" variant="tonal" color="error" :prepend-icon="mdiDeleteOutline"
-          @click="removeOverlay">Remove</v-btn>
-      </div>
-      <div v-if="overlayHasImage && overlayName" class="text-caption text-truncate mb-2" :title="overlayName">
-        {{ overlayName }}
-      </div>
+      <v-select :model-value="overlaySource" :items="OVERLAY_SOURCE_OPTIONS" item-title="title" item-value="value"
+        label="Overlay" hide-details class="mb-3" @update:model-value="setOverlaySource" />
+      <template v-if="overlaySource === 'custom'">
+        <input ref="overlayFileInput" type="file" accept="image/*" class="d-none" @change="onOverlayFileChange" />
+        <div class="d-flex ga-2 mb-2">
+          <v-btn variant="tonal" class="flex-grow-1" :prepend-icon="mdiImagePlusOutline" :loading="overlayBusy"
+            @click="overlayFileInput?.click()">
+            {{ overlayHasCustomImage ? 'Replace image' : 'Choose image' }}
+          </v-btn>
+          <v-btn v-if="overlayHasCustomImage" variant="tonal" color="error" :prepend-icon="mdiDeleteOutline"
+            @click="removeOverlay">Remove</v-btn>
+        </div>
+        <div v-if="overlayHasCustomImage && overlayName" class="text-caption text-truncate mb-2" :title="overlayName">
+          {{ overlayName }}
+        </div>
+      </template>
       <v-alert v-if="overlayError" type="error" variant="tonal" density="compact" class="mb-2" closable
         @click:close="overlayError = ''">
         {{ overlayError }}
@@ -176,12 +171,8 @@
       </v-alert>
       <v-switch v-model="overlayVisible" :disabled="!overlayHasImage" color="primary" label="Show overlay image"
         hide-details />
-      <v-slider v-model="overlayOpacity" :min="0" :max="100" :step="1" :disabled="!overlayHasImage" label="Opacity"
-        hide-details class="mb-4">
-        <template #append>
-          <span class="overlay-opacity-value">{{ Math.round(overlayOpacity) }}%</span>
-        </template>
-      </v-slider>
+      <SliderField v-model="overlayOpacity" :min="0" :max="100" :step="1" suffix="%" :disabled="!overlayHasImage"
+        label="Opacity" class="mb-4" />
       <v-select v-model="overlayFit" :items="OVERLAY_FIT_OPTIONS" item-title="title" item-value="value"
         :disabled="!overlayHasImage" label="Fit" hide-details />
 
@@ -189,7 +180,7 @@
       <div class="text-caption text-medium-emphasis mb-2">
         In camera image coordinates (independent of the preview rotation).
       </div>
-      <OverlaySliderField label="Rotate" suffix="°" :min="OVERLAY_TRANSFORM_LIMITS.rotation.min"
+      <SliderField label="Rotate" suffix="°" :step="0.1" :min="OVERLAY_TRANSFORM_LIMITS.rotation.min"
         :max="OVERLAY_TRANSFORM_LIMITS.rotation.max" :model-value="overlayTransform.rotation"
         :disabled="!overlayHasImage" @update:model-value="updateOverlayTransform({ rotation: $event })" />
       <div class="d-flex ga-2 mb-3">
@@ -198,24 +189,25 @@
         <v-btn variant="tonal" size="small" class="flex-grow-1" :prepend-icon="mdiRotateRight"
           :disabled="!overlayHasImage" @click="rotateOverlayBy(90)">+90°</v-btn>
       </div>
-      <OverlaySliderField v-if="overlayTransform.lockAspect" label="Scale" :min="OVERLAY_TRANSFORM_LIMITS.scale.min"
-        :max="OVERLAY_TRANSFORM_LIMITS.scale.max" :model-value="overlayTransform.scaleX" :disabled="!overlayHasImage"
+      <SliderField v-if="overlayTransform.lockAspect" label="Scale" suffix="%" :step="0.1"
+        :min="OVERLAY_TRANSFORM_LIMITS.scale.min" :max="OVERLAY_TRANSFORM_LIMITS.scale.max"
+        :model-value="overlayTransform.scaleX" :disabled="!overlayHasImage"
         @update:model-value="updateOverlayTransform({ scaleX: $event })" />
       <template v-else>
-        <OverlaySliderField label="Scale X" :min="OVERLAY_TRANSFORM_LIMITS.scale.min"
+        <SliderField label="Scale X" suffix="%" :step="0.1" :min="OVERLAY_TRANSFORM_LIMITS.scale.min"
           :max="OVERLAY_TRANSFORM_LIMITS.scale.max" :model-value="overlayTransform.scaleX"
           :disabled="!overlayHasImage" @update:model-value="updateOverlayTransform({ scaleX: $event })" />
-        <OverlaySliderField label="Scale Y" :min="OVERLAY_TRANSFORM_LIMITS.scale.min"
+        <SliderField label="Scale Y" suffix="%" :step="0.1" :min="OVERLAY_TRANSFORM_LIMITS.scale.min"
           :max="OVERLAY_TRANSFORM_LIMITS.scale.max" :model-value="overlayTransform.scaleY"
           :disabled="!overlayHasImage" @update:model-value="updateOverlayTransform({ scaleY: $event })" />
       </template>
       <v-switch :model-value="overlayTransform.lockAspect" :disabled="!overlayHasImage" color="primary"
         label="Lock aspect ratio" hide-details
         @update:model-value="updateOverlayTransform({ lockAspect: $event === true })" />
-      <OverlaySliderField label="Offset X" :min="OVERLAY_TRANSFORM_LIMITS.offset.min"
+      <SliderField label="Offset X" suffix="%" :step="0.1" :min="OVERLAY_TRANSFORM_LIMITS.offset.min"
         :max="OVERLAY_TRANSFORM_LIMITS.offset.max" :model-value="overlayTransform.offsetX" :disabled="!overlayHasImage"
         @update:model-value="updateOverlayTransform({ offsetX: $event })" />
-      <OverlaySliderField label="Offset Y" :min="OVERLAY_TRANSFORM_LIMITS.offset.min"
+      <SliderField label="Offset Y" suffix="%" :step="0.1" :min="OVERLAY_TRANSFORM_LIMITS.offset.min"
         :max="OVERLAY_TRANSFORM_LIMITS.offset.max" :model-value="overlayTransform.offsetY" :disabled="!overlayHasImage"
         @update:model-value="updateOverlayTransform({ offsetY: $event })" />
       <div class="d-flex align-center ga-1 mb-3">
@@ -262,14 +254,14 @@ import {
 import { useMainStore } from '@/store/mainstore';
 import { useAlignmentLines } from '@/composables/useAlignmentLines';
 import {
-  useOverlayImage, OVERLAY_FIT_OPTIONS, OVERLAY_TRANSFORM_LIMITS, isDefaultOverlayTransform, overlayTransformCss,
-  wrapRotation,
+  useOverlayImage, OVERLAY_FIT_OPTIONS, OVERLAY_SOURCE_OPTIONS, OVERLAY_TRANSFORM_LIMITS, isDefaultOverlayTransform,
+  overlayTransformCss, wrapRotation,
 } from '@/composables/useOverlayImage';
 import { capturePreview } from '@/composables/usePreviewCapture';
 import type { Point } from '@/utils/previewGeometry';
 import AlignmentOverlay from '@/components/AlignmentOverlay.vue';
 import OverlayMoveSurface from '@/components/OverlayMoveSurface.vue';
-import OverlaySliderField from '@/components/OverlaySliderField.vue';
+import SliderField from '@/components/SliderField.vue';
 
 const LOADING_IMAGE_SRC = "/loading.jpg"
 const rotationOptions = [
@@ -355,8 +347,11 @@ const confirmClearLines = () => {
 }
 
 const {
+  source: overlaySource,
+  setSource: setOverlaySource,
   url: overlayUrl,
   name: overlayName,
+  hasCustomImage: overlayHasCustomImage,
   opacity: overlayOpacity,
   visible: overlayVisible,
   fit: overlayFit,
@@ -696,11 +691,5 @@ onUnmounted(() => {
   transform-origin: center;
   pointer-events: none;
   user-select: none;
-}
-
-.overlay-opacity-value {
-  display: inline-block;
-  min-width: 3em;
-  text-align: right;
 }
 </style>

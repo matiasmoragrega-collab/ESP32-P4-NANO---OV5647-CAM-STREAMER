@@ -56,6 +56,11 @@ extern const uint8_t assets_index_js_gz_start[] asm("_binary_index_js_gz_start")
 extern const uint8_t assets_index_js_gz_end[] asm("_binary_index_js_gz_end");
 extern const uint8_t assets_index_css_gz_start[] asm("_binary_index_css_gz_start");
 extern const uint8_t assets_index_css_gz_end[] asm("_binary_index_css_gz_end");
+/* Embedded with EMBED_FILES (no trailing NUL): end - start is the exact .gz size. */
+extern const uint8_t overlays_master_png_gz_start[] asm("_binary_Master_overlay_png_gz_start");
+extern const uint8_t overlays_master_png_gz_end[] asm("_binary_Master_overlay_png_gz_end");
+extern const uint8_t overlays_blank_png_gz_start[] asm("_binary_Blank_overlay_png_gz_start");
+extern const uint8_t overlays_blank_png_gz_end[] asm("_binary_Blank_overlay_png_gz_end");
 
 /**
  * @brief Web cam control structure
@@ -658,6 +663,17 @@ static esp_err_t static_file_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "text/css");
         httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
         return httpd_resp_send(req, (const char *)assets_index_css_gz_start, assets_index_css_gz_end - assets_index_css_gz_start);
+    } else if (strcmp(uri, "/overlays/Master_overlay.png") == 0) {
+        /* httpd_resp_send() loops until the whole (~800 KB) buffer is written, with a Content-Length header. */
+        httpd_resp_set_type(req, "image/png");
+        httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+        httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+        return httpd_resp_send(req, (const char *)overlays_master_png_gz_start, overlays_master_png_gz_end - overlays_master_png_gz_start);
+    } else if (strcmp(uri, "/overlays/Blank_overlay.png") == 0) {
+        httpd_resp_set_type(req, "image/png");
+        httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+        httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+        return httpd_resp_send(req, (const char *)overlays_blank_png_gz_start, overlays_blank_png_gz_end - overlays_blank_png_gz_start);
     }
 
     /* If no static file matches, return 404 */
