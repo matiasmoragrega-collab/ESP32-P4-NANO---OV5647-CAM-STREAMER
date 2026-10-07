@@ -1,6 +1,9 @@
 <template>
   <v-app>
-    <router-view />
+    <!-- v-main makes room for non-temporary navigation drawers (camera settings panel). -->
+    <v-main>
+      <router-view />
+    </v-main>
   </v-app>
 </template>
 

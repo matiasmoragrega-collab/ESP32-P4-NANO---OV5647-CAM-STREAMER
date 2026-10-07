@@ -7,7 +7,10 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AlignmentOverlay: typeof import('./components/AlignmentOverlay.vue')['default']
     CameraCard: typeof import('./components/CameraCard.vue')['default']
+    OverlayMoveSurface: typeof import('./components/OverlayMoveSurface.vue')['default']
+    OverlaySliderField: typeof import('./components/OverlaySliderField.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
   }

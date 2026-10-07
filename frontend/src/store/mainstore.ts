@@ -5,6 +5,8 @@ import type { Camera, } from "@/camera";
 export const useMainStore = defineStore("main", () => {
   const clientCameras = ref<Camera[]>([]);
   const netRequestError = ref<boolean>(false);
+  /** Camera number (index into clientCameras) whose settings panel is open, or null. Only one panel is open at a time. */
+  const settingsPanelCamNum = ref<number | null>(null);
 
   let updateIntervalId: ReturnType<typeof setInterval> | null = null;
 
@@ -32,6 +34,7 @@ export const useMainStore = defineStore("main", () => {
   return {
     clientCameras,
     netRequestError,
+    settingsPanelCamNum,
     updateCameraStatus,
   };
 });
