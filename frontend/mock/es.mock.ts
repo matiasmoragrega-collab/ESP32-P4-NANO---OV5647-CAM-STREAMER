@@ -32,6 +32,8 @@ const lensState = {
   distortion: null as Distortion | null,
 };
 let frameVersion = 0;
+/** Frame-rate caps (null = no limit), as the firmware keeps them per sensor. */
+const capsState = { sensorCap: null as number | null, streamCap: null as number | null };
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
@@ -60,6 +62,8 @@ const computeWindow = (mode: (typeof OV5647_MODES)[number]): Window => {
 const ov5647 = {
   index: 0,
   name: "OV5647",
+  sensorName: "OV5647",
+  sensorPid: 0x5647,
   src: "/api/mock_frame?index=0&v=0",
   currentFrameRate: 45,
   currentImageFormat: 0,
@@ -71,7 +75,13 @@ const ov5647 = {
   imageFormats: OV5647_MODES.map((mode, id) => ({
     id,
     description: `${mode.width}x${mode.height} RAW10 @${mode.fps} fps`,
-    quality: { min: 1, max: 100, step: 1, default: 80 },
+    width: mode.width,
+    height: mode.height,
+    maxFps: mode.fps,
+    quality: mode.width * mode.height >= 1920 * 1080
+      ? { min: 1, max: 100, step: 1, default: 70,
+          note: `Default 70 at this size keeps ${mode.fps} fps within 100 Mbit/s Ethernet` }
+      : { min: 1, max: 100, step: 1, default: 80 },
   })),
 } as Camera;
 
@@ -81,6 +91,14 @@ const refreshOv5647 = () => {
   const mode = OV5647_MODES[formatId] ?? OV5647_MODES[0];
   camera.imageFormats.forEach((format, id) => {
     format.window = computeWindow(OV5647_MODES[id]);
+    const w = format.window;
+    format.fieldOfView = {
+      coverage: {
+        horizontal: Math.round(1e4 * w.width / OV5647_SENSOR.activeArea.width) / 1e4,
+        vertical: Math.round(1e4 * w.height / OV5647_SENSOR.activeArea.height) / 1e4,
+      },
+      method: w.scale > 1 ? "binned" : "crop",
+    };
   });
   camera.sensor = OV5647_SENSOR;
   camera.lensCalibration = {
@@ -90,7 +108,18 @@ const refreshOv5647 = () => {
   };
   camera.window = computeWindow(mode);
   camera.currentResolution = { width: mode.width, height: mode.height };
-  camera.currentFrameRate = mode.fps;
+  const sensorFps = capsState.sensorCap !== null ? Math.min(capsState.sensorCap, mode.fps) : mode.fps;
+  camera.currentFrameRate = sensorFps;
+  camera.frameRate = {
+    sensorCap: capsState.sensorCap,
+    streamCap: capsState.streamCap,
+    sensorFps,
+    modeMaxFps: mode.fps,
+    framesPerImage: 1,
+    imageFps: sensorFps,
+    streamFps: capsState.streamCap !== null ? Math.min(capsState.streamCap, sensorFps) : sensorFps,
+    capMin: 1,
+  };
   camera.currentImageFormatDescription = camera.imageFormats[formatId]?.description;
   camera.src = `/api/mock_frame?index=0&v=${frameVersion}`;
 };
@@ -423,6 +452,18 @@ export default (): MockHandler[] => [
 
           if (jpeg_quality !== undefined) {
             camera.currentQuality = jpeg_quality;
+          }
+
+          // Frame-rate caps: number (1..120) or null = no limit; absent = unchanged.
+          for (const [key, field] of [["sensor_fps_cap", "sensorCap"], ["stream_fps_cap", "streamCap"]] as const) {
+            const value = config[key];
+            if (value === undefined) continue;
+            if (value !== null && (typeof value !== "number" || value < 1 || value > 120)) {
+              res.statusCode = 400;
+              res.end("Invalid JSON format");
+              return;
+            }
+            capsState[field] = value;
           }
 
           if (camera === ov5647) {

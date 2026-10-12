@@ -1,0 +1,234 @@
+{
+    "version": 1,
+    "writable": true,
+    "description": "b0310",
+    "IMX708":
+    {
+        "//": "Project tuning for the IMX708 (Arducam B0310, M12 120 deg lens, fixed focus) on an ESP32-P4 < rev 3.0. Derived from mushbraindave/esp_cam_sensor_imx 0.4.0 cfg/imx708_default.json (kept as imx708_default.upstream-0.4.0.json). It is used together with main/isp_ipa_hook.c (CONFIG_EXAMPLE_IMX708_COLOUR_PIPELINE), which applies the white balance in the LSC stage and removes the 64/1023 black pedestal: every luma and white-balance number below is in pedestal-free raw units (8-bit), not the pedestal-included values the upstream file was written for. 'writable' lets the firmware set the anti-flicker frequency from Kconfig (EXAMPLE_IMX708_ANTI_FLICKER_*) before the pipeline starts; ac_freq here is only the default. See docs/camera-formats.md, 'IMX708 image quality'.",
+        "adn": {
+            "bf":
+            [
+                {
+                    "gain": 1,
+                    "param": {
+                        "level": 3,
+                        "matrix":
+                        [
+                            1, 2, 1,
+                            2, 4, 2,
+                            1, 2, 1
+                        ]
+                    }
+                },
+                {
+                    "gain": 4,
+                    "param": {
+                        "level": 6,
+                        "matrix":
+                        [
+                            1, 2, 1,
+                            2, 4, 2,
+                            1, 2, 1
+                        ]
+                    }
+                },
+                {
+                    "gain": 8,
+                    "param": {
+                        "level": 8,
+                        "matrix":
+                        [
+                            1, 2, 1,
+                            2, 4, 2,
+                            1, 2, 1
+                        ]
+                    }
+                }
+            ]
+        },
+        "agc":
+        {
+            "//": "luma values are the AE block luminance after the pedestal is removed (linear, 0..255). target 46 = 18% grey through the sRGB curve below. Upstream had a 50..150 hold band, i.e. AE did nothing anywhere between 'dark' and 'blown' and the brightness depended on where it happened to stop; the band is now +-10%. Upstream also used low_light_priority, which weights the darker blocks up and blows the highlights of a bright scene; high_light_priority gives bright blocks (light fittings, white walls) extra weight instead, and only a few blocks brighter than 235 are ignored as light sources.",
+            "exposure":
+            {
+                "frame_delay": 2,
+                "adjust_delay": 0
+            },
+            "gain":
+            {
+                "min_step": 0.0001,
+                "frame_delay": 2,
+                "max": 16
+            },
+            "anti_flicker":
+            {
+                "mode": "full",
+                "ac_freq": 50
+            },
+            "f_n0": 1,
+            "luma_adjust":
+            {
+                "target_low": 42,
+                "target_high": 51,
+                "target": 46,
+                "low_threshold": 4,
+                "low_regions": 3,
+                "high_threshold": 235,
+                "high_regions": 3,
+                "weight":
+                [
+                    1, 1, 1, 1, 1,
+                    1, 2, 2, 2, 1,
+                    1, 2, 4, 2, 1,
+                    1, 2, 2, 2, 1,
+                    1, 1, 1, 1, 1
+                ]
+            },
+            "mode": "high_light_priority",
+            "high_light_priority":
+            {
+                "low_threshold": 110,
+                "high_threshold": 235,
+                "weight_offset": 2,
+                "luma_offset": 0
+            },
+            "low_light_priority":
+            {
+                "low_threshold": 40,
+                "high_threshold": 80,
+                "weight_offset": 10,
+                "luma_offset": 10
+            }
+        },
+        "aen": {
+            "gamma":
+            {
+                "//": "BT.709 transfer curve (upstream: x^0.72, which also clipped everything above 240). BT.709 rather than sRGB because its toe is 4.5x instead of 12.9x: this ISP works on 8-bit linear data, and a steeper toe turns each linear LSB of noise or black-level error into ~13 output levels of coloured shadow noise. The x points are log-spaced (the ISP only needs power-of-two steps) so the toe is sampled finely; the hook composes the black-level removal into it per channel. gamma_param is unused (use_gamma_param false) but the generator requires it.",
+                "use_gamma_param": false,
+                "luma_env": "ae.luma.avg",
+                "luma_min_step": 16.0,
+                "table":
+                [
+                    {
+                        "luma": 71.1,
+                        "gamma_param": 0.45,
+                        "x": [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 192, 255],
+                        "y": [4, 9, 18, 27, 34, 46, 55, 72, 85, 107, 125, 155, 180, 202, 221, 255]
+                    }
+                ]
+            },
+            "sharpen":
+            [
+                {
+                    "gain": 1,
+                    "param": {
+                        "h_thresh": 56,
+                        "l_thresh": 10,
+                        "h_coeff": 0.400,
+                        "m_coeff": 0.600,
+                        "matrix":
+                        [
+                            1, 2, 1,
+                            2, 2, 2,
+                            1, 2, 1
+                        ]
+                    }
+                },
+                {
+                    "gain": 8,
+                    "param": {
+                        "h_thresh": 80,
+                        "l_thresh": 24,
+                        "h_coeff": 0.250,
+                        "m_coeff": 0.350,
+                        "matrix":
+                        [
+                            1, 2, 1,
+                            2, 2, 2,
+                            1, 2, 1
+                        ]
+                    }
+                }
+            ],
+            "contrast":
+            [
+                {
+                    "gain": 1,
+                    "value": 128
+                }
+            ]
+        },
+        "ian":
+        {
+            "luma":
+            {
+                "ae":
+                {
+                    "weight":
+                    [
+                        1, 1, 1, 1, 1,
+                        1, 2, 2, 2, 1,
+                        1, 2, 4, 2, 1,
+                        1, 2, 2, 2, 1,
+                        1, 1, 1, 1, 1
+                    ]
+                }
+            }
+        },
+        "awb":
+        {
+            "//": "Grey world over 'white patch' candidates. The window is in pedestal-free raw R/G and B/G (the hook maps it into the post-LSC domain the ISP measures in). Upstream's window (rg 0.50..0.89, bg 0.48..0.78, pedestal included) excluded the real neutrals under the lab's LED lighting (white card: raw R/G 0.50, B/G 0.34), so AWB balanced on whatever else fell inside and left a yellow-green cast; and its 0.5 minimum gain step froze the first estimate for good. The window below covers the IMX708's daylight..tungsten locus with margin, still rejects saturated yellows/oranges (B/G ~0.1) and greens, and the gains track in 0.02 steps.",
+            "model": 0,
+            "min_counted": 500,
+            "min_red_gain_step": 0.02,
+            "min_blue_gain_step": 0.02,
+            "red_gain_scale": 1.0,
+            "blue_gain_scale": 1.0,
+            "range":
+            {
+                "green": { "max": 235, "min": 50 },
+                "rg":    { "max": 0.95, "min": 0.35 },
+                "bg":    { "max": 0.85, "min": 0.22 }
+            },
+            "green_luma_env": "ae.luma.avg",
+            "green_luma_init": 200,
+            "green_luma_step_ratio": 0.3
+        },
+        "acc": {
+            "//": "CCM: upstream's uncalibrated seed with the green row pulling a further 0.15 x (R - G) out of green (rows still sum to 1, so neutrals are untouched). With the WB/black-level fixes in place that brought the orange reference box from 35-38 deg hue to ~32 deg while the yellow cable stays at 51-53 deg. A proper matrix needs a colour chart (24-patch) under the target light - see docs/camera-formats.md.",
+            "saturation":
+            [
+                {
+                    "color_temp": 0,
+                    "value": 128
+                }
+            ],
+            "ccm":
+            {
+                "low_luma":
+                {
+                    "luma_env": "ae.luma.avg",
+                    "threshold": 8,
+                    "matrix":
+                    [
+                        1.00, 0.00, 0.00,
+                        0.00, 1.00, 0.00,
+                        0.00, 0.00, 1.00
+                    ]
+                },
+                "table":
+                [
+                    {
+                        "color_temp": 0,
+                        "matrix":
+                        [
+                             1.6000, -0.4000, -0.2000,
+                            -0.4500,  1.7000, -0.2500,
+                            -0.1500, -0.5500,  1.7000
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+}

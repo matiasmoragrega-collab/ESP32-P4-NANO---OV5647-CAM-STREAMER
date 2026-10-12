@@ -1,6 +1,6 @@
-"""Shared helpers for the OV5647 lens-calibration tools.
+"""Shared helpers for the lens-calibration tools (OV5647 and IMX708).
 
-Sensor coordinates (see docs/lens-calibration.md): OV5647 pixel-array addresses
+Sensor coordinates (see docs/lens-calibration.md): the sensor's pixel-array addresses (per sensor, from camera_info)
 in full-resolution pixels, continuous "edge" convention (array column i spans
 [i, i+1)). The device reports, for the active mode, a ``window`` object:
 

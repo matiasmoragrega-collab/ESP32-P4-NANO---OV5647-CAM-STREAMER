@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenCV checkerboard calibration of the OV5647 lens, expressed in SENSOR coordinates.
+"""OpenCV checkerboard calibration of the camera lens (OV5647 or IMX708), expressed in SENSOR coordinates.
 
   python calibrate.py shots --board 9x6 [--square 25] [--upload 192.168.137.209]
   python calibrate.py --vignetting flat.jpg --info shots/camera_info.json

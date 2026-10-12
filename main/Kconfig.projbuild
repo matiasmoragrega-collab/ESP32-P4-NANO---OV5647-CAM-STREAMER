@@ -2,16 +2,18 @@ menu "Example Configuration"
     
     config EXAMPLE_CAMERA_VIDEO_BUFFER_NUMBER
         int "Camera video buffer number"
-        default 2
+        default 3
+        range 2 6
         help
-            Number of video buffers for the camera sensor.
-            
-            More buffers provide better performance and reduce frame drops,
-            but consume more memory. Recommended range: 2-4 buffers.
-            
-            - 2 buffers: Minimum for basic operation
-            - 3-4 buffers: Better performance for smooth streaming
-            - Higher values: May improve performance but increase memory usage
+            Number of V4L2 capture buffers (one full uncompressed frame each,
+            in PSRAM: 4 MB at 1920x1080 RGB565).
+
+            The capture task JPEG-encodes each frame straight out of its
+            V4L2 buffer, and at 1920x1080 the hardware encoder needs about
+            30-33 ms of the 33.3 ms frame. With 2 buffers any encode that
+            runs long makes the CSI receiver drop the next frame; 3 gives
+            one frame of slack and keeps the sensor rate (see
+            docs/camera-formats.md, "Frame rate").
 
     config EXAMPLE_JPEG_COMPRESSION_QUALITY
         int "JPEG compression quality (%)"
@@ -30,6 +32,25 @@ menu "Example Configuration"
             and host system capabilities when choosing quality level.
 
             Recommended: 80 for balanced quality and performance.
+
+            This is the default for every capture size below 1920x1080;
+            1920x1080 uses EXAMPLE_JPEG_COMPRESSION_QUALITY_FULL_HD.
+
+    config EXAMPLE_JPEG_COMPRESSION_QUALITY_FULL_HD
+        int "JPEG compression quality at 1920x1080 (%)"
+        default 70
+        range 1 100
+        help
+            Default JPEG quality for 1920x1080 (and larger) capture sizes.
+
+            At 30 fps, 1920x1080 is limited by the 100 Mbit/s Ethernet link:
+            about 10.3 MB/s of JPEG gets through while the encoder shares
+            PSRAM, i.e. about 340 KB per frame. Measured on an indoor scene:
+            quality 80 = 350 KB (28.8 fps delivered), 75 = 296 KB (30.0),
+            70 = 265 KB (30.0), 60 = 214 KB (30.0). 70 keeps 30 fps with
+            ~25% headroom for busier scenes. The web UI's quality slider
+            starts at this value for 1920x1080 and can be moved; smaller
+            modes use EXAMPLE_JPEG_COMPRESSION_QUALITY.
 
     config EXAMPLE_HTTP_PART_BOUNDARY
         string "HTTP part boundary"
@@ -60,6 +81,90 @@ menu "Example Configuration"
             This hostname will be used for network identification and can be
             accessed as "esp-web.local" on the local network (if mDNS is supported
             by the client device).
+
+    config EXAMPLE_IMX708_HMIRROR
+        bool "IMX708: mirror the sensor readout horizontally"
+        default y
+        help
+            Sensor mirror bit (register 0x0101 bit 0) programmed for an IMX708
+            camera. Together with EXAMPLE_IMX708_VFLIP (both on by default,
+            the Raspberry Pi convention for IMX708 modules, whose sensor is
+            mounted rotated by 180 degrees) this gives an upright, unmirrored
+            picture. Turn one or both off if your module is mounted differently.
+            The lens-centre window maths and the Bayer phase follow this setting.
+
+    config EXAMPLE_IMX708_VFLIP
+        bool "IMX708: flip the sensor readout vertically"
+        default y
+        help
+            Sensor flip bit (register 0x0101 bit 1) programmed for an IMX708
+            camera. See EXAMPLE_IMX708_HMIRROR.
+
+    config EXAMPLE_IMX708_COLOUR_PIPELINE
+        bool "IMX708: white balance in the LSC stage and black-level removal"
+        default y
+        help
+            ESP32-P4 chips before rev 3.0 have no black-level or white-balance
+            block in the ISP: esp_video folds the white-balance gains into the
+            colour matrix and the sensor's black pedestal is never removed.
+            With the IMX708 that turns clipped highlights magenta, lifts and
+            tints the blacks and skews the auto white balance. With this
+            option the IMX708's white balance is applied in the ISP's LSC
+            (raw, pre-demosaic) stage, where clipped pixels stay neutral, and
+            its 64/1023 pedestal is removed exactly in the gamma curve (see
+            main/isp_ipa_hook.c and docs/camera-formats.md). Other sensors
+            (OV5647) are not affected. Can be toggled at run time through
+            the debug API for A/B comparison.
+
+    choice EXAMPLE_IMX708_ANTI_FLICKER
+        prompt "IMX708: mains frequency for anti-flicker"
+        default EXAMPLE_IMX708_ANTI_FLICKER_50HZ
+        help
+            The IMX708's auto exposure (esp_ipa) keeps exposure times at
+            multiples of the light flicker period of the local mains supply,
+            so artificial light does not band or pulse. 50 Hz: UK, Europe and
+            most of the world; 60 Hz: North America and parts of Asia/South
+            America. "Off" lets exposure take any value (outdoors, DC-driven
+            LEDs). The OV5647 runs its own on-sensor AE and is not affected.
+
+        config EXAMPLE_IMX708_ANTI_FLICKER_50HZ
+            bool "50 Hz"
+        config EXAMPLE_IMX708_ANTI_FLICKER_60HZ
+            bool "60 Hz"
+        config EXAMPLE_IMX708_ANTI_FLICKER_OFF
+            bool "Off"
+    endchoice
+
+    config EXAMPLE_IMX708_FRAME_RATE
+        int "IMX708: sensor frame rate (fps)"
+        default 30
+        range 5 40
+        help
+            Frame rate the IMX708 runs at in every mode. The driver's mode
+            tables run at 28 fps; after each mode change the frame length
+            (VTS) is shortened to the longest that still gives at least this
+            rate (30 -> 2494 lines = 30.01 fps). The readout window does not
+            move, so lens-centred cropping is unaffected. The auto-exposure
+            ceiling follows: (frame length - 48 lines) rounded down to whole
+            mains-flicker periods, i.e. 30 ms at 30 fps with 50 Hz
+            anti-flicker. At 1920x1080 the P4's JPEG encoder needs about
+            30 ms per frame, so above ~30 fps the stream can no longer keep
+            up with the sensor at that size (see docs/camera-formats.md).
+            This is also the top of the user-selectable sensor frame-rate
+            cap (web UI / sensor_fps_cap, stored per sensor in NVS), which
+            can only run the sensor slower.
+
+    config EXAMPLE_ENABLE_ISP_DEBUG_API
+        bool "Enable the ISP/IPA debug API"
+        default y
+        help
+            Adds GET/POST /api/debug/isp (AE/AWB/CCM/gamma/module state, IPA
+            statistics, sensor registers, and debug overrides such as manual
+            white balance, CCM, gamma, flat LSC gains, manual exposure and
+            raw sensor register writes) and GET /api/debug/raw_bayer (one
+            unprocessed RAW10 frame with the ISP bypassed) on the control
+            port (80). Nothing is exposed on the stream ports. Intended for
+            image-quality work; turn it off for a locked-down build.
 
     config EXAMPLE_ENABLE_MIPI_CSI_CROP
         bool "Enable crop for MIPI-CSI video device"

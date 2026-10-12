@@ -6,6 +6,8 @@
       Calibration source:
       <v-chip size="x-small" :color="applied.source === 'calibrated' ? 'success' : undefined" variant="tonal"
         class="ml-1">{{ applied.source }}</v-chip>
+      <template v-if="camera.sensorName"> The calibration is stored per sensor (this one: {{ camera.sensorName }}),
+        so swapping cameras never applies another sensor's centre.</template>
     </div>
 
     <!-- Sensor map -->
@@ -178,7 +180,7 @@ import {
   DISTORTION_KEYS, GRID_STEP_DEG, RING_ANGLES_DEG, fieldOfViewDeg, isValidDistortion, snapHalf,
   type DistortionKey, type LensModel,
 } from '@/utils/lensModel'
-import { parseCalibrationFile, validateCenter, type LensCalibrationBody } from '@/utils/lensCalibrationFile'
+import { parseCalibrationFile, validateCenter, type LensCalibrationBody, type LensCalibrationFile } from '@/utils/lensCalibrationFile'
 import { useMainStore } from '@/store/mainstore'
 import SliderField from '@/components/SliderField.vue'
 
@@ -328,7 +330,7 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 
 const modeLabel = (w: SensorWindow) => {
   const label = `${Math.round(w.width / w.scale)}x${Math.round(w.height / w.scale)}`
-  return w.scale !== 1 ? `${label} bin${w.scale}` : label
+  return w.scale !== 1 ? `${label} bin${+w.scale.toFixed(2)}` : label
 }
 
 const modes = computed<ModeEntry[]>(() => {
@@ -547,7 +549,10 @@ const onFileChange = async (event: Event) => {
     if (parsed.distortion) setDistortionDraft(parsed.distortion)
     const otherCamera = parsed.index !== null && String(parsed.index) !== String(props.camera.index)
       ? ` Note: the file was made for camera ${parsed.index}.` : ''
-    info.value = `Imported ${file.name}. Review the values, then Apply.${otherCamera}`
+    const otherSensor = parsed.sensor && props.camera.sensorName && parsed.sensor !== props.camera.sensorName
+      ? ` Warning: the file was made for a ${parsed.sensor} sensor, this camera is a ${props.camera.sensorName}`
+        + ' - sensor coordinates differ between sensors.' : ''
+    info.value = `Imported ${file.name}. Review the values, then Apply.${otherCamera}${otherSensor}`
   } catch (e) {
     error.value = `Import failed: ${e instanceof Error ? e.message : String(e)}`
   }
@@ -555,8 +560,9 @@ const onFileChange = async (event: Event) => {
 
 const exportCalibration = () => {
   const cal = applied.value
-  const body: LensCalibrationBody & { source: string } = {
+  const body: LensCalibrationFile = {
     index: props.camera.index,
+    sensor: props.camera.sensorName,
     center: { ...cal.center },
     distortion: cal.distortion ? { ...cal.distortion } : null,
     source: cal.source,
@@ -565,7 +571,9 @@ const exportCalibration = () => {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `camera_${props.camera.index}_lens_calibration.json`
+  link.download = props.camera.sensorName
+    ? `camera_${props.camera.index}_${props.camera.sensorName.toLowerCase()}_lens_calibration.json`
+    : `camera_${props.camera.index}_lens_calibration.json`
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)

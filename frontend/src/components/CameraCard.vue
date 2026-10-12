@@ -42,7 +42,7 @@
           {{ cameraTitle }}
         </div>
         <div style="font-size: smaller; opacity: 70%;">
-          {{ camera.currentImageFormatDescription }} @ {{ camera.currentFrameRate }} fps
+          <span v-if="camera.sensorName">{{ camera.sensorName }} · </span>{{ camera.currentImageFormatDescription }} @ {{ headerFps }} fps
           <span v-if="camera.currentQuality">
             (Quality: {{ camera.currentQuality }})
           </span>
@@ -102,7 +102,7 @@
     <div class="d-flex align-center pl-4 pr-2 py-2">
       <v-icon :icon="mdiCog" class="mr-2" />
       <div class="text-subtitle-1 font-weight-bold text-truncate">
-        {{ cameraTitle }}
+        {{ cameraTitle }}<span v-if="camera.sensorName" class="font-weight-regular text-medium-emphasis"> · {{ camera.sensorName }}</span>
       </div>
       <v-spacer />
       <v-btn variant="text" size="small" :icon="mdiClose" @click="settingsOpen = false" aria-label="Close settings"
@@ -114,10 +114,15 @@
       <div class="text-overline mb-2">Camera settings</div>
       <v-select v-model="selectedRotation" :items="rotationOptions" item-title="title" item-value="value"
         :disabled="settingsSaving" label="Preview rotation" />
-      <v-select v-model="selectedImageFormatId" :items="camera.imageFormats" item-title="description" item-value="id"
+      <v-select v-model="selectedImageFormatId" :items="formatItems" item-title="title" item-value="id"
         :disabled="settingsSaving" label="Image size / format" />
       <div class="text-caption text-medium-emphasis mb-3">
-        Sets the camera capture resolution and frame rate.
+        Sets the camera capture resolution and frame rate. "% of view" is the share of the sensor the mode shows
+        (crop modes cut the edges off).
+        <template v-if="selectedFramesPerImage > 1">
+          This mode shows the whole sensor by scanning it in four quarters, one per sensor frame: one image per
+          {{ selectedFramesPerImage }} sensor frames, and moving objects can show seams between the quarters.
+        </template>
       </div>
       <v-switch v-if="camera.supportsAutoBrightness" v-model="selectedAutoBrightness" :disabled="settingsSaving"
         color="primary" label="Automatic brightness" hide-details />
@@ -126,8 +131,37 @@
       </div>
       <SliderField v-model="selectedQuality" v-if="selectedFormat?.quality" :min="selectedFormat?.quality.min ?? 80"
         :max="selectedFormat?.quality.max ?? 95" :step="selectedFormat?.quality.step ?? 1" :disabled="settingsSaving"
-        label="Quality" label-width="5.5em" class="mb-3" />
-      <div v-else class="text-center mb-4">This image format may not support quality settings</div>
+        label="Quality" label-width="5.5em" :class="selectedFormat?.quality?.note ? 'mb-1' : 'mb-3'" />
+      <div v-if="selectedFormat?.quality?.note" class="text-caption text-medium-emphasis mb-3">
+        {{ selectedFormat.quality.note }}
+      </div>
+      <div v-if="!selectedFormat?.quality" class="text-center mb-4">This image format may not support quality settings</div>
+      <template v-if="camera.frameRate">
+        <div class="d-flex align-center">
+          <div class="text-subtitle-2 flex-grow-1">Sensor frame rate limit</div>
+          <v-switch v-model="sensorCapOn" :disabled="settingsSaving" color="primary" density="compact" hide-details
+            :label="sensorCapOn ? 'On' : 'No limit'" />
+        </div>
+        <SliderField v-if="sensorCapOn" v-model="selectedSensorCap" :min="capMin" :max="sensorCapMax" :step="1"
+          suffix="fps" :disabled="settingsSaving" label="Sensor" label-width="5.5em" class="mb-1" />
+        <div class="text-caption text-medium-emphasis mb-3">
+          Runs the sensor slower (up to {{ fmtFps(sensorCapMax) }} fps in this mode); exposure can then grow with the
+          longer frame. Sensor now: {{ fmtFps(camera.frameRate.sensorFps) }} fps.
+        </div>
+        <div class="d-flex align-center">
+          <div class="text-subtitle-2 flex-grow-1">Stream frame rate limit</div>
+          <v-switch v-model="streamCapOn" :disabled="settingsSaving" color="primary" density="compact" hide-details
+            :label="streamCapOn ? 'On' : 'No limit'" />
+        </div>
+        <SliderField v-if="streamCapOn" v-model="selectedStreamCap" :min="capMin" :max="streamCapMax"
+          :step="streamCapStep" suffix="fps" :disabled="settingsSaving" label="Stream" label-width="5.5em"
+          class="mb-1" />
+        <div class="text-caption text-medium-emphasis mb-3">
+          Sends at most this many images per second (the sensor keeps its rate). Camera delivers
+          {{ fmtFps(camera.frameRate.streamFps ?? camera.frameRate.sensorFps) }} fps;
+          received here: {{ measuredFps === null ? '…' : `${fmtFps(measuredFps)} fps` }}.
+        </div>
+      </template>
       <SliderField v-for="control in camera.imageControls ?? []" :key="control.key"
         :model-value="selectedImageControls[control.key] ?? control.value" :min="control.min" :max="control.max"
         :step="control.step" :disabled="settingsSaving" :label="control.label" label-width="5.5em" class="mb-3"
@@ -274,7 +308,7 @@ import { useLensGuides } from '@/composables/useLensGuides';
 import type { Point } from '@/utils/previewGeometry';
 import { buildLensGuides, isValidDistortion, type LensModel } from '@/utils/lensModel';
 import { isWebGlSupported, type UndistortParams } from '@/utils/undistortRenderer';
-import type { Camera, LensCalibration, SensorInfo, SensorWindow } from '@/camera';
+import type { Camera, ImageFormat, LensCalibration, SensorInfo, SensorWindow } from '@/camera';
 import AlignmentOverlay from '@/components/AlignmentOverlay.vue';
 import LensCalibrationPanel from '@/components/LensCalibrationPanel.vue';
 import LensGuidesOverlay from '@/components/LensGuidesOverlay.vue';
@@ -332,6 +366,12 @@ const selectedRotation = ref<number>(rotation.value)
 const selectedImageFormatId = ref<number | string>(camera.value.currentImageFormat)
 const selectedQuality = ref<number>(camera.value.currentQuality ?? 80)
 const selectedAutoBrightness = ref<boolean>(camera.value.autoBrightnessEnabled ?? true)
+const sensorCapOn = ref<boolean>(camera.value.frameRate?.sensorCap != null)
+const selectedSensorCap = ref<number>(camera.value.frameRate?.sensorCap ?? 15)
+const streamCapOn = ref<boolean>(camera.value.frameRate?.streamCap != null)
+const selectedStreamCap = ref<number>(camera.value.frameRate?.streamCap ?? 15)
+/** Images per second received by this browser's preview (null until measured). */
+const measuredFps = ref<number | null>(null)
 const selectedImageControls = ref<Record<string, number>>({})
 const settingsSaving = ref<boolean>(false)
 const snackbar = ref<boolean>(false)
@@ -511,6 +551,49 @@ const selectedFormat = computed(() => {
   return camera.value.imageFormats.find(format => format.id === selectedImageFormatId.value)
 })
 
+const fmtFps = (fps: number) => String(Math.round(fps * 10) / 10)
+const FOV_METHOD_LABELS: Record<string, string> = {
+  crop: 'crop',
+  binned: 'binned',
+  tiled: 'full sensor, 4-frame scan',
+}
+const percent = (share: number) => `${Math.round(share * 100)}%`
+/** "1920x1080 RAW10 @30 fps · 83% of view (crop)". */
+const formatLabel = (format: ImageFormat) => {
+  const fov = format.fieldOfView
+  if (!fov) return format.description
+  const { horizontal: h, vertical: v } = fov.coverage
+  const share = Math.abs(h - v) < 0.005 ? percent(h) : `${percent(h)} x ${percent(v)}`
+  const method = fov.method ? ` (${FOV_METHOD_LABELS[fov.method] ?? fov.method})` : ''
+  return `${format.description.replace(/ \(4-frame scan\)$/, '')} · ${share} of view${method}`
+}
+const formatItems = computed(() => camera.value.imageFormats.map(format => ({ id: format.id, title: formatLabel(format) })))
+
+const capMin = computed(() => camera.value.frameRate?.capMin ?? 1)
+const selectedFramesPerImage = computed(() => selectedFormat.value?.framesPerImage ?? 1)
+/** Sensor cap range: up to the selected mode's own rate. */
+const sensorCapMax = computed(() => Math.max(capMin.value,
+  Math.floor((selectedFormat.value?.maxFps ?? camera.value.frameRate?.modeMaxFps ?? 30) + 1e-6)))
+/** Stream cap range: up to the images per second the selected mode (with its sensor cap) delivers. */
+const streamCapMax = computed(() => {
+  const sensor = sensorCapOn.value ? Math.min(selectedSensorCap.value, sensorCapMax.value) : sensorCapMax.value
+  const images = sensor / selectedFramesPerImage.value
+  return Math.max(capMin.value, images >= 10 ? Math.floor(images + 1e-6) : Math.floor(images * 2 + 1e-6) / 2)
+})
+const streamCapStep = computed(() => streamCapMax.value < 10 ? 0.5 : 1)
+// Keep the staged caps inside the selected mode's range (e.g. after picking the 7.5 fps full-sensor mode).
+watch(sensorCapMax, (max) => {
+  if (selectedSensorCap.value > max) selectedSensorCap.value = max
+})
+watch(streamCapMax, (max) => {
+  if (selectedStreamCap.value > max) selectedStreamCap.value = max
+})
+const headerFps = computed(() => fmtFps(camera.value.frameRate?.streamFps ?? camera.value.currentFrameRate))
+
+/** Caps as the firmware reports them: null = off. */
+const capOf = (on: boolean, value: number, max: number) => on ? Math.min(value, max) : null
+const sameCap = (a: number | null, b: number | null) => (a === null || b === null) ? a === b : Math.abs(a - b) < 1e-3
+
 const cameraAspectRatio = computed(() => camera.value.currentResolution.width / camera.value.currentResolution.height)
 const previewRotation = computed(() => settingsOpen.value ? selectedRotation.value : rotation.value)
 const previewViewportStyle = computed(() => ({
@@ -527,6 +610,11 @@ const loadSettingsFromCamera = () => {
   selectedImageFormatId.value = camera.value.currentImageFormat
   selectedQuality.value = camera.value.currentQuality ?? selectedQuality.value
   selectedAutoBrightness.value = camera.value.autoBrightnessEnabled ?? true
+  const fr = camera.value.frameRate
+  sensorCapOn.value = fr?.sensorCap != null
+  selectedSensorCap.value = fr?.sensorCap ?? Math.min(15, sensorCapMax.value)
+  streamCapOn.value = fr?.streamCap != null
+  selectedStreamCap.value = fr?.streamCap ?? Math.min(15, streamCapMax.value)
   selectedImageControls.value = Object.fromEntries(
     (camera.value.imageControls ?? []).map(control => [control.key, control.value])
   )
@@ -539,6 +627,8 @@ const settingsDirty = computed(() => {
     || (!!selectedFormat.value?.quality && cam.currentQuality != null && selectedQuality.value !== cam.currentQuality)
     || (!!cam.supportsAutoBrightness && selectedAutoBrightness.value !== (cam.autoBrightnessEnabled ?? true))
     || (cam.imageControls ?? []).some(control => (selectedImageControls.value[control.key] ?? control.value) !== control.value)
+    || (!!cam.frameRate && (!sameCap(capOf(sensorCapOn.value, selectedSensorCap.value, sensorCapMax.value), cam.frameRate.sensorCap)
+      || !sameCap(capOf(streamCapOn.value, selectedStreamCap.value, streamCapMax.value), cam.frameRate.streamCap)))
 })
 
 const toggleSettings = () => {
@@ -683,6 +773,9 @@ const saveSettings = async () => {
       jpeg_quality: selectedQuality.value,
       image_controls: selectedImageControls.value,
       auto_brightness_enabled: camera.value.supportsAutoBrightness ? selectedAutoBrightness.value : undefined,
+      // Frame-rate caps (null = no limit); only sent to firmware that reports them.
+      sensor_fps_cap: camera.value.frameRate ? capOf(sensorCapOn.value, selectedSensorCap.value, sensorCapMax.value) : undefined,
+      stream_fps_cap: camera.value.frameRate ? capOf(streamCapOn.value, selectedStreamCap.value, streamCapMax.value) : undefined,
     })
   }).then(res => {
     if (res.ok) {
@@ -721,11 +814,65 @@ watch(selectedImageFormatId, (formatId) => {
   }
 })
 
+/*
+ * Delivered stream rate, measured in this browser: an MJPEG <img> fires no per-frame event, so while the
+ * settings panel is open a tiny copy of the live image is drawn every animation frame and changes are
+ * counted (sensor noise makes every new frame differ). Valid up to the display refresh rate.
+ */
+let fpsRaf = 0
+let fpsCanvas: HTMLCanvasElement | null = null
+let fpsLast = ''
+let fpsCount = 0
+let fpsSince = 0
+const sampleFps = (now: number) => {
+  fpsRaf = requestAnimationFrame(sampleFps)
+  const img = getLivePreviewImage()
+  if (!img) {
+    fpsSince = now
+    fpsCount = 0
+    return
+  }
+  fpsCanvas ??= document.createElement('canvas')
+  fpsCanvas.width = 16
+  fpsCanvas.height = 9
+  const ctx = fpsCanvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return
+  let key = ''
+  try {
+    ctx.drawImage(img, 0, 0, 16, 9)
+    key = Array.from(ctx.getImageData(0, 0, 16, 9).data).join(',')
+  } catch {
+    return  // tainted canvas (no CORS): no measurement
+  }
+  if (key !== fpsLast) {
+    fpsLast = key
+    fpsCount++
+  }
+  if (!fpsSince) fpsSince = now
+  if (now - fpsSince >= 2000) {
+    measuredFps.value = (fpsCount * 1000) / (now - fpsSince)
+    fpsCount = 0
+    fpsSince = now
+  }
+}
+const stopFpsSampling = () => {
+  if (fpsRaf) cancelAnimationFrame(fpsRaf)
+  fpsRaf = 0
+}
+watch(settingsOpen, (open) => {
+  stopFpsSampling()
+  measuredFps.value = null
+  fpsSince = 0
+  fpsCount = 0
+  if (open) fpsRaf = requestAnimationFrame(sampleFps)
+}, { immediate: true })
+
 onMounted(() => {
   reloadCameraSrc();
 })
 
 onUnmounted(() => {
+  stopFpsSampling()
   if (retryTimeoutId.value) {
     clearTimeout(retryTimeoutId.value)
     retryTimeoutId.value = null

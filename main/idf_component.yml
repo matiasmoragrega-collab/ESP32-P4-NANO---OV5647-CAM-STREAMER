@@ -6,6 +6,8 @@ dependencies:
   protocol_examples_common:
     path: ${IDF_PATH}/examples/common_components/protocol_examples_common
   espressif/mdns: "^1.0.3"
+  # Community IMX708 driver (Apache-2.0) - self-registers into esp_cam_sensor auto-detect.
+  mushbraindave/esp_cam_sensor_imx: "^0.4.0"
   espressif/cjson:
     version: "^1.7.15"
     rules:

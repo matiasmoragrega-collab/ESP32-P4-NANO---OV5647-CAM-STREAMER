@@ -8,6 +8,9 @@ export type LensCalibrationBody = {
   distortion: LensDistortion | null;
 }
 
+/** calibration.json: the POST body plus the sensor it was made for (sensor coordinates are per sensor). */
+export type LensCalibrationFile = LensCalibrationBody & { sensor?: string, source?: string }
+
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
 
 const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
@@ -33,7 +36,7 @@ export const validateDistortion = (value: unknown): LensDistortion => {
 }
 
 /**
- * Parses a calibration.json file (same shape as the POST body: `{ index?, center: {x, y}, distortion: null | {...} }`).
+ * Parses a calibration.json file (same shape as the POST body: `{ index?, sensor?, center: {x, y}, distortion: null | {...} }`).
  * Unknown extra fields are ignored. Throws an Error with a user-facing message.
  */
 export const parseCalibrationFile = (text: string, activeArea: SensorRect) => {
@@ -50,5 +53,6 @@ export const parseCalibrationFile = (text: string, activeArea: SensorRect) => {
   validateCenter(center, activeArea)
   const distortion = data.distortion === undefined || data.distortion === null ? null : validateDistortion(data.distortion)
   const index = typeof data.index === 'number' || typeof data.index === 'string' ? data.index : null
-  return { center, distortion, index }
+  const sensor = typeof data.sensor === 'string' && data.sensor.length > 0 ? data.sensor : null
+  return { center, distortion, index, sensor }
 }

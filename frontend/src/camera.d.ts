@@ -3,14 +3,47 @@ export type QualityRange = {
   max: number;
   step?: number;
   default?: number;
+  /** Why this mode's default differs from the others (firmware supplied). */
+  note?: string;
+};
+
+/** Share of the sensor's active area a mode shows, and how (newer firmware only). */
+export type FieldOfView = {
+  coverage: { horizontal: number, vertical: number };
+  /** "crop": window of the binned field; "binned": 2x2-binned window (OV5647); "tiled": IMX708 4-frame scan of the whole sensor. */
+  method?: string;
 };
 
 export type ImageFormat = {
   id: string | number;
   description: string;
+  /** Delivered image size (newer firmware only). */
+  width?: number;
+  height?: number;
   quality?: QualityRange;
   /** Sensor readout window of this mode (newer firmware only). */
   window?: SensorWindow;
+  fieldOfView?: FieldOfView | null;
+  /** Highest sensor frame rate of the mode = top of the sensor-cap range (newer firmware only). */
+  maxFps?: number;
+  /** Sensor frames per delivered image (4 for the IMX708 full-sensor scan; absent = 1). */
+  framesPerImage?: number;
+};
+
+/** Frame-rate state and caps (newer firmware only). Caps are null when off. */
+export type FrameRateInfo = {
+  sensorCap: number | null;
+  streamCap: number | null;
+  /** Actual sensor frame rate. */
+  sensorFps: number;
+  /** Uncapped sensor rate of the current mode. */
+  modeMaxFps: number;
+  framesPerImage?: number;
+  /** Images per second before the stream cap (sensorFps / framesPerImage). */
+  imageFps?: number;
+  /** What a stream client receives. */
+  streamFps?: number;
+  capMin?: number;
 };
 
 /** A rectangle in sensor pixel coordinates. */
@@ -82,6 +115,10 @@ export type CameraImageControl = {
 export type Camera = {
   index: string | number;
   name?: string;
+  /** Detected image sensor, e.g. "OV5647" or "IMX708" (newer firmware only). */
+  sensorName?: string;
+  /** Sensor product ID read at detection, e.g. 0x5647 or 0x0708 (newer firmware only). */
+  sensorPid?: number;
   src: string;
   currentFrameRate: number;
   currentImageFormat: number | string;
@@ -97,4 +134,5 @@ export type Camera = {
   lensCalibration?: LensCalibration;
   /** Readout window of the current mode. */
   window?: SensorWindow;
+  frameRate?: FrameRateInfo;
 };

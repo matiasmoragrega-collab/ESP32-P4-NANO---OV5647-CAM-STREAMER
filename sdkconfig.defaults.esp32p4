@@ -21,6 +21,28 @@ CONFIG_SPIRAM_SPEED_200M=y
 
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
 
+# Second supported camera: Sony IMX708 (Arducam B0310 12MP 120deg, Pi Camera Module 3 class)
+# via the community component mushbraindave/esp_cam_sensor_imx. Both the OV5647 and the
+# IMX708 are probed at boot; whichever answers on the SCCB bus is used.
+CONFIG_CAMERA_IMX708=y
+CONFIG_CAMERA_IMX708_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+# Mode 0 = 1920x1080 (widest field of view the P4 datapath can carry).
+CONFIG_CAMERA_IMX708_MIPI_IF_FORMAT_INDEX_DEFAULT=0
+CONFIG_CAMERA_IMX708_LINK_FREQ_450MHZ=y
+CONFIG_CAMERA_IMX219=n
+# The B0310 is manual focus (M12 lens, no VCM): no DW9807 driver / motor control.
+CONFIG_CAM_MOTOR_DW9807=n
+# IMX708 orientation (main/Kconfig.projbuild): both on = Raspberry Pi convention for IMX708
+# modules (sensor mounted rotated 180 deg) -> upright, unmirrored picture.
+CONFIG_EXAMPLE_IMX708_HMIRROR=y
+CONFIG_EXAMPLE_IMX708_VFLIP=y
+# IMX708 image quality (docs/camera-formats.md): white balance in the ISP's LSC stage + black-level
+# removal (P4 < rev 3.0 has neither block), 50 Hz mains anti-flicker (UK/EU; _60HZ / _OFF available).
+CONFIG_EXAMPLE_IMX708_COLOUR_PIPELINE=y
+CONFIG_EXAMPLE_IMX708_ANTI_FLICKER_50HZ=y
+# ISP/IPA debug API on the control port (/api/debug/isp, /api/debug/raw_bayer).
+CONFIG_EXAMPLE_ENABLE_ISP_DEBUG_API=y
+
 CONFIG_EXAMPLE_SELECT_CUSTOMIZED_DEV_BOARD=y
 CONFIG_EXAMPLE_ENABLE_MIPI_CSI_CAM_SENSOR=y
 CONFIG_EXAMPLE_ENABLE_DVP_CAM_SENSOR=n
@@ -41,3 +63,12 @@ CONFIG_ETHERNET_PHY_ADDR=1
 CONFIG_ETHERNET_PHY_RST_GPIO=51
 CONFIG_ETHERNET_MDC_GPIO=31
 CONFIG_ETHERNET_MDIO_GPIO=52
+
+# EMAC DMA: one 1536-byte buffer per Ethernet frame (64-byte aligned, as the P4 needs) and the
+# maximum 30 TX descriptors (the default 10 x 512 B holds about three full frames; a full ring
+# makes the driver reject the frame). With the lwIP options in sdkconfig.defaults this took raw
+# TCP from 6.35 to 11.8 MB/s (100 Mbit/s wire speed); see docs/camera-formats.md, "Frame rate".
+CONFIG_ETH_DMA_BUFFER_SIZE=1536
+CONFIG_ETH_DMA_TX_BUFFER_NUM=30
+CONFIG_ETH_DMA_RX_BUFFER_NUM=20
+CONFIG_ETH_IRAM_OPTIMIZATION=y

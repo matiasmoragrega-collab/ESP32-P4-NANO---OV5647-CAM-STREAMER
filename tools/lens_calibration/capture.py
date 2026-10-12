@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grab calibration frames from the ESP32-P4 OV5647 camera.
+"""Grab calibration frames from the ESP32-P4 camera (OV5647 or IMX708).
 
 Frames come from http://<host>/api/capture_image?source=<n> (full-quality JPEG of the
 current mode); the device's /api/get_camera_info is saved alongside as

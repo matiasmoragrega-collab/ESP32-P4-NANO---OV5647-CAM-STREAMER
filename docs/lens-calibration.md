@@ -1,16 +1,21 @@
 # Lens centre and lens calibration
 
-The firmware places every OV5647 sensor mode's readout window so that the centre of the
-output image sits on the lens's optical centre. Nothing is scaled or resampled: the stream
+The firmware places every sensor mode's readout window (OV5647 and IMX708) so that the
+centre of the output image sits on the lens's optical centre. Nothing is scaled or resampled: the stream
 is still the sensor's native pixels, only *which* pixels are read out changes. The lens
 model (centre + distortion) is stored on the device and reported to the web UI, which uses
 it for guides/display only; it is never applied to the stream.
 
 ## Sensor coordinates
 
-All positions are **OV5647 pixel-array addresses in full-resolution pixels**, the address
-space of the array-window registers 0x3800-0x3807, using a continuous *edge* convention:
+Positions are **the sensor's own full-resolution pixel addresses**, so they differ between
+the OV5647 and the IMX708. `GET /api/get_camera_info` reports which sensor is connected
+(`sensorName`) and its address space (`sensor`). A continuous *edge* convention is used:
 array column `i` covers `[i, i+1)` (its centre is `i + 0.5`).
+
+### OV5647
+
+Addresses of the array-window registers 0x3800-0x3807:
 
 | Region | x | y | size |
 |---|---|---|---|
@@ -20,7 +25,18 @@ array column `i` covers `[i, i+1)` (its centre is `i + 0.5`).
 The default lens centre (no calibration stored) is the active-area centre **(1312, 978)**.
 A lens centre must lie inside the active area (x 16..2608, y 6..1950).
 
-## Window model
+### IMX708
+
+Addresses of the analog-crop registers 0x0344-0x034B, which start at the first effective
+pixel (the optical-black border is not addressable):
+
+| Region | x | y | size |
+|---|---|---|---|
+| Whole array = active area | 0 .. 4607 | 0 .. 2591 | 4608 x 2592 |
+
+Default lens centre **(2304, 1296)**; a lens centre must lie in x 0..4608, y 0..2592.
+
+## Window model (OV5647)
 
 For a mode with output size `out_w x out_h` and subsampling/binning scale `s` (2 for the
 2x2-binned modes, 1 otherwise; derived from registers 0x3814/0x3815), the firmware reads an
@@ -74,22 +90,95 @@ The 1280 x 960 mode reads 2560 x 1920 of the 2592 x 1944 active pixels, so it ca
 follow the lens centre by +-16 px horizontally and +-12 px vertically; beyond that it is
 clamped and `centerError` shows the residual. All smaller modes centre exactly (to +-1 px).
 
-### Orientation
+### Orientation (OV5647)
 
 All modes use the 1280 x 960 orientation: sensor mirror on (0x3821 bit 1), no flip
 (0x3820 bit 1), ISP mirror/flip bits (bit 2) off; binning bits are kept per mode. (The
 stock tables already used this orientation in every mode - the register comments in the
 driver are misleading - the firmware now enforces it.)
 
+## Window model (IMX708)
+
+Every IMX708 mode of `mushbraindave/esp_cam_sensor_imx` reads the whole 4608 x 2592 array,
+bins it 2x2 to a **2304 x 1296 field** and takes a digital crop of `w x h` (the output size)
+at `(crop_x, crop_y)` binned px (registers 0x0408-0x040B). The sensor's scaler is read-only,
+so the output is never resampled. The firmware rewrites only the crop offsets in a RAM copy
+of the mode table (output size, binning, PLL and timing unchanged), so the window is
+`2w x 2h` sensor px (`scale` 2) and moves in steps of 2 binned = **4 sensor px** (an even
+offset keeps the RGGB phase; verified on hardware with an offset of 2 mod 4).
+
+The crop offsets count in **readout order**, i.e. after the sensor's mirror/flip (register
+0x0101). With the firmware's orientation (mirror and flip both on) that gives
+
+```
+crop_x   = clamp(round_to_even(2304 - w/2 - cx/2), 0, 2304 - w)
+crop_y   = clamp(round_to_even(1296 - h/2 - cy/2), 0, 1296 - h)
+window.x = 2 * (2304 - crop_x - w)          window.y = 2 * (1296 - crop_y - h)
+window.mirror = true, window.flip = true, window.scale = 2
+```
+
+and the same output-to-sensor mapping as above. The firmware reads `w`, `h`, the binning
+factors and the analog window from the mode's register table, so the maths follows the
+driver's tables. Verified on hardware: moving the lens centre by (+384, +216) sensor px
+moved the picture content by (+192, +108) output px (exactly as computed), and by
+(+200, -100) moved it by (+100, -50).
+
+### Windows at the default centre (2304, 1296)
+
+| Mode | scale | output region (sensor) | digital crop (binned) | centre range x / y |
+|---|---|---|---|---|
+| 1920 x 1080 RAW10 | 2 | x 384..4223, y 216..2375 | (192, 108) | 1920..2688 / 1080..1512 |
+| 1280 x 720 RAW10 | 2 | x 1024..3583, y 576..2015 | (512, 288) | 1280..3328 / 720..1872 |
+| 1024 x 768 RAW10 | 2 | x 1280..3327, y 528..2063 | (640, 264) | 1024..3584 / 768..1824 |
+| 800 x 600 RAW10 | 2 | x 1504..3103, y 696..1895 | (752, 348) | 800..3808 / 600..1992 |
+| 640 x 480 RAW10 | 2 | x 1664..2943, y 816..1775 | (832, 408) | 640..3968 / 480..2112 |
+
+These are the driver's own centred crops. `centerError` is 0 or +-2 sensor px (4-px steps)
+inside the centre range.
+
+The **2304 x 1296 full-view mode** (4-tile scan, see camera-formats.md) shows the whole sensor:
+window x 0..4607, y 0..2591, `scale` 2. It cannot move, so its `centerRange` is the single point
+(2304, 1296) and `centerError` is (2304 - cx, 1296 - cy) - the lens centre simply sits where it is
+in the image. The window code reads binning, subsampling, scaler and digital-crop size from each
+mode's register table, so `scale` (sensor px per image px) may be non-integer for a scaled mode;
+the API then also reports `scaleY` when it differs from `scale`.
+
+### Orientation (IMX708)
+
+The IMX708 driver applies mirror/flip through register 0x0101 and every flip moves the
+Bayer phase (RGGB, GRBG, GBRG, BGGR). The firmware sets the orientation before each
+`VIDIOC_S_SENSOR_FMT` and hands `esp_video` a format whose `isp_info.bayer_type` matches it
+(esp_video 2.5 latches the phase from the format it is given, which for the driver's static
+table is always RGGB; without this correction any flip gives wrong colours).
+
+Default: **mirror and flip both on** (Kconfig `EXAMPLE_IMX708_HMIRROR` / `EXAMPLE_IMX708_VFLIP`).
+That is the Raspberry Pi convention for IMX708 modules (the sensor sits rotated by 180° on
+Camera Module 3 style boards, Linux device tree `rotation = <180>`), so a module mounted
+like the OV5647 (same cable direction) gives an upright, unmirrored picture. During
+bring-up the camera lay face-up on a desk (ceiling view), so upright/unmirrored could not be
+confirmed from the scene: **check it once with the camera in place** (text in view is the
+easiest test) and, if needed, turn one or both options off in menuconfig or
+`sdkconfig.defaults.esp32p4` and rebuild. The window maths and the Bayer phase follow the
+options automatically; a stored IMX708 calibration should be redone after a change.
+
 ## Persistent calibration (NVS)
 
-Namespace `lens_cal`, key `calib`: one blob holding version, `cx`, `cy` (double, sensor
-coords), a distortion flag and `fx, fy, k1, k2, p1, p2, k3` (double). No key = defaults
-(`source: "default"`). Reset erases the key.
+Namespace `lens_cal`, one key **per sensor**: `calib_ov5647`, `calib_imx708` (`"calib_"` +
+lower-case sensor name). Each holds one blob with version, `cx`, `cy` (double, that sensor's
+coordinates), a distortion flag and `fx, fy, k1, k2, p1, p2, k3` (double). No key = defaults
+for that sensor (`source: "default"`, active-area centre). Reset erases only the connected
+sensor's key. Swapping cameras therefore never applies the wrong calibration; each camera
+gets its own back when it is reconnected. A stored centre outside the sensor's active area is
+ignored (defaults are used).
+
+Older firmware stored a single key `calib` (always from an OV5647). On the first boot of
+this firmware it is moved to `calib_ov5647` (log line
+`migrated lens calibration "calib" -> "calib_ov5647"`; verified on hardware).
 
 ## API
 
-`GET /api/get_camera_info` adds to each camera: `sensor` (array size and active area),
+`GET /api/get_camera_info` adds to each camera: `sensorName` (e.g. `"OV5647"`, `"IMX708"`),
+`sensorPid` (chip ID, e.g. 0x0708), `sensor` (array size and active area),
 `lensCalibration` (`center`, `source`, `distortion` or null) and `window` (the applied
 window); each `imageFormats[]` entry gets the `window` that mode would use.
 
@@ -101,7 +190,8 @@ window); each `imageFormats[]` entry gets the `window` that mode would use.
 {"index":0, "reset":true}
 ```
 
-The values are validated (finite numbers, centre inside the active area, fx/fy > 0), the
+The values are validated (finite numbers, centre inside the connected sensor's active area,
+fx/fy > 0), the
 current mode is re-applied with the new window (the stream pauses briefly, JPEG quality and
 image controls are kept) and then the calibration is saved. Response `OK`, or HTTP 400 with
 a message (500 if the re-apply/save failed; the previous calibration is restored then).
@@ -116,6 +206,19 @@ OpenCV 5-parameter model in sensor coordinates: `x = (X - cx)/fx`, `y = (Y - cy)
 the stored lens centre. Image-space intrinsics measured in a mode convert as
 `fx_sensor = fx_image * scale`, the principal point through the window mapping, and the
 mirror flips the sign of `p2` (a flip would flip `p1`); `calibrate.py` does this.
+
+**Wide-angle / fisheye lenses (follow-up, not implemented).** The tools and the UI use the
+5-parameter pinhole model above. That is fine for the OV5647's lens, but the IMX708 module's
+M12 lens covers about 152° diagonally, and a polynomial pinhole model fits such lenses
+poorly towards the edges (it cannot represent rays at or beyond 90° and the high-order terms
+become unstable). For the IMX708 the lens **centre** found by `calibrate.py` is usually
+still usable, but expect a high RMS error near the corners and unreliable `k1..k3`. A proper
+fit needs OpenCV's fisheye model (`cv2.fisheye.calibrate`, equidistant projection with
+k1..k4) or the rational model (`CALIB_RATIONAL_MODEL`) in `tools/lens_calibration/`, plus a
+matching distortion type in the API, NVS record and UI guides. Until then, prefer the centre
+only (`--no-k3` and ignore the distortion values) for the IMX708. The exported
+`calibration.json` now records the sensor it was made for (`"sensor"`), and the UI warns when
+a file made for the other sensor is imported.
 
 ## Calibration procedure
 
@@ -139,9 +242,9 @@ squares, on A4/A3 at 100 % scale. Glue it to something flat and rigid (foam boar
 glass). Measure the square size if you want metric extrinsics (not needed for the lens
 centre).
 
-### 3. Capture ~15 varied shots in 1280 x 960
+### 3. Capture ~15 varied shots in the widest mode
 
-1. Select **1280 x 960** in the web UI (widest view; any mode works because the window is
+1. Select the widest mode in the web UI (OV5647: **1280 x 960**, IMX708: **1920 x 1080**; any mode works because the window is
    recorded, but use one mode per capture folder).
 2. Fix the camera; keep the focus as it will be used.
 3. Run
@@ -180,7 +283,8 @@ meaningful if the falloff is still clearly visible; the tool warns when it is no
 ### 5. Verify
 
 * Re-read `/api/get_camera_info`: `lensCalibration.source` is `calibrated`; every mode's
-  `window.centerError` is ~0 except 1280 x 960 if the centre is more than 16/12 px off.
+  `window.centerError` is ~0 (IMX708: up to 2 px, 4-px steps) except where a mode is clamped
+  (OV5647 1280 x 960 beyond +-16/12 px; IMX708 1920 x 1080 beyond +-384/216 px).
 * Cycle through all modes in the UI: an object at the lens centre must stay at the image
   centre in every mode (only the crop/zoom changes), and the image must not be mirrored or
   flipped between modes.
@@ -188,7 +292,12 @@ meaningful if the falloff is still clearly visible; the tool warns when it is no
 
 ## Hardware verification (development record)
 
-Measured on the P4 Nano + OV5647 by SIFT/phase-correlation registration of every mode
+IMX708 (Arducam B0310) on the P4 Nano: lens-centred cropping verified by image registration
+(see "Window model (IMX708)"); every mode is exactly the centred crop of 1920 x 1080 at the
+default centre; colours identical with crop offsets of 0 and 2 mod 4; migration of the
+legacy NVS key and per-sensor persistence across reboots verified.
+
+OV5647: measured on the P4 Nano + OV5647 by SIFT/phase-correlation registration of every mode
 against a 1280 x 960 capture, using the mapping above: residuals were <= 1.3 sensor px in all
 modes, both at the default centre and with the centre moved by (+200, +100) px (windows moved
 as computed; 1280 x 960 clamped at its +16/+12 limit). Colour ratios (G/R, G/B) match the
