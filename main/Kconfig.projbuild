@@ -82,6 +82,46 @@ menu "Example Configuration"
             accessed as "esp-web.local" on the local network (if mDNS is supported
             by the client device).
 
+    config EXAMPLE_ETH_DHCP_FALLBACK
+        bool "Ethernet: use a fallback IPv4 address when no DHCP server answers"
+        default y
+        depends on EXAMPLE_CONNECT_ETHERNET
+        help
+            Without this, the firmware waits for a DHCP lease forever and the web
+            server never starts when the board is plugged straight into a computer
+            that does not share its connection (no DHCP server on the cable).
+
+            With this on, if no lease arrives within
+            EXAMPLE_ETH_DHCP_FALLBACK_TIMEOUT_MS after the link comes up, the DHCP
+            client is stopped and EXAMPLE_ETH_FALLBACK_IP is used instead (by default
+            a link-local 169.254.x.y address derived from the MAC). A computer with
+            no DHCP server on that port gives itself a 169.254.x.y address too, so
+            the two can talk directly. The address is printed in the serial log.
+            DHCP is tried again every time the Ethernet link comes back up.
+
+    config EXAMPLE_ETH_DHCP_FALLBACK_TIMEOUT_MS
+        int "Ethernet: DHCP wait before using the fallback address (ms)"
+        default 10000
+        range 1000 120000
+        depends on EXAMPLE_ETH_DHCP_FALLBACK
+
+    config EXAMPLE_ETH_FALLBACK_IP
+        string "Ethernet: fallback IPv4 address (empty = link-local from MAC)"
+        default ""
+        depends on EXAMPLE_ETH_DHCP_FALLBACK
+        help
+            Static IPv4 address used when no DHCP server answers, e.g.
+            "192.168.137.50". Leave empty for a link-local 169.254.x.y address
+            derived from the board's MAC address (netmask 255.255.0.0).
+
+    config EXAMPLE_ETH_FALLBACK_NETMASK
+        string "Ethernet: fallback netmask"
+        default "255.255.255.0"
+        depends on EXAMPLE_ETH_DHCP_FALLBACK
+        help
+            Netmask for EXAMPLE_ETH_FALLBACK_IP. Not used for the link-local
+            default, which always uses 255.255.0.0.
+
     config EXAMPLE_IMX708_HMIRROR
         bool "IMX708: mirror the sensor readout horizontally"
         default y

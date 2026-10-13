@@ -3222,6 +3222,92 @@ fail0:
     return ret;
 }
 
+#if CONFIG_EXAMPLE_ETH_DHCP_FALLBACK
+/*
+ * Ethernet IPv4 fallback. example_connect() waits for a DHCP lease forever, so with no DHCP server on the cable
+ * (board plugged straight into a PC that isn't sharing its connection) the web server never starts. If no lease
+ * arrives within the timeout after link-up, stop the DHCP client and set a fallback address; setting it posts
+ * IP_EVENT_ETH_GOT_IP, which also lets example_connect() return. DHCP is retried on every link-up.
+ */
+static esp_timer_handle_t s_dhcp_fallback_timer;
+
+static void dhcp_fallback_timer_cb(void *arg)
+{
+    esp_netif_t *netif = get_example_netif_from_desc(EXAMPLE_NETIF_DESC_ETH);
+    if (netif == NULL) {
+        return;
+    }
+    esp_netif_ip_info_t current = { 0 };
+    if (esp_netif_get_ip_info(netif, &current) == ESP_OK && current.ip.addr != 0) {
+        return; /* A lease arrived meanwhile. */
+    }
+    esp_err_t err = esp_netif_dhcpc_stop(netif);
+    if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        ESP_LOGE(TAG, "DHCP fallback: could not stop the DHCP client (%s)", esp_err_to_name(err));
+        return;
+    }
+
+    esp_netif_ip_info_t ip_info = { 0 };
+    if (strlen(CONFIG_EXAMPLE_ETH_FALLBACK_IP) > 0) {
+        ip_info.ip.addr = esp_ip4addr_aton(CONFIG_EXAMPLE_ETH_FALLBACK_IP);
+        ip_info.netmask.addr = esp_ip4addr_aton(CONFIG_EXAMPLE_ETH_FALLBACK_NETMASK);
+    } else {
+        /* Link-local (RFC 3927) address from the MAC, in the usable 169.254.1.0 - 169.254.254.255 range. */
+        uint8_t mac[6] = { 0 };
+        esp_netif_get_mac(netif, mac);
+        esp_netif_set_ip4_addr(&ip_info.ip, 169, 254, 1 + (mac[4] % 254), mac[5]);
+        esp_netif_set_ip4_addr(&ip_info.netmask, 255, 255, 0, 0);
+    }
+    err = esp_netif_set_ip_info(netif, &ip_info);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "DHCP fallback: could not set " IPSTR " (%s)", IP2STR(&ip_info.ip), esp_err_to_name(err));
+        esp_netif_dhcpc_start(netif);
+        return;
+    }
+    ESP_LOGW(TAG, "No DHCP lease within %d ms: using fallback IPv4 " IPSTR "/" IPSTR " - open http://" IPSTR "/",
+             CONFIG_EXAMPLE_ETH_DHCP_FALLBACK_TIMEOUT_MS, IP2STR(&ip_info.ip), IP2STR(&ip_info.netmask),
+             IP2STR(&ip_info.ip));
+}
+
+static void dhcp_fallback_eth_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
+                                            void *event_data)
+{
+    if (event_id == ETHERNET_EVENT_CONNECTED) {
+        /* After a fallback the DHCP client is stopped: start it again so a DHCP server found later wins. */
+        esp_netif_t *netif = get_example_netif_from_desc(EXAMPLE_NETIF_DESC_ETH);
+        esp_netif_dhcp_status_t status;
+        if (netif != NULL && esp_netif_dhcpc_get_status(netif, &status) == ESP_OK
+                && status == ESP_NETIF_DHCP_STOPPED) {
+            esp_netif_dhcpc_start(netif);
+        }
+        esp_timer_stop(s_dhcp_fallback_timer);
+        esp_timer_start_once(s_dhcp_fallback_timer, (uint64_t)CONFIG_EXAMPLE_ETH_DHCP_FALLBACK_TIMEOUT_MS * 1000);
+    } else if (event_id == ETHERNET_EVENT_DISCONNECTED) {
+        esp_timer_stop(s_dhcp_fallback_timer);
+    }
+}
+
+static void dhcp_fallback_got_ip_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
+                                         void *event_data)
+{
+    esp_timer_stop(s_dhcp_fallback_timer);
+}
+
+static void init_dhcp_fallback(void)
+{
+    const esp_timer_create_args_t timer_args = {
+        .callback = dhcp_fallback_timer_cb,
+        .name = "dhcp_fallback",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_dhcp_fallback_timer));
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ETHERNET_EVENT_CONNECTED,
+                                               dhcp_fallback_eth_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ETHERNET_EVENT_DISCONNECTED,
+                                               dhcp_fallback_eth_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, dhcp_fallback_got_ip_handler, NULL));
+}
+#endif /* CONFIG_EXAMPLE_ETH_DHCP_FALLBACK */
+
 static void initialise_mdns(void)
 {
     ESP_ERROR_CHECK(mdns_init());
@@ -3260,6 +3346,11 @@ void app_main(void)
     initialise_mdns();
     netbiosns_init();
     netbiosns_set_name(EXAMPLE_MDNS_HOST_NAME);
+
+#if CONFIG_EXAMPLE_ETH_DHCP_FALLBACK
+    /* Registered before example_connect(), which blocks until the Ethernet interface has an IPv4 address. */
+    init_dhcp_fallback();
+#endif
 
     /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
      * Read "Establishing Wi-Fi or Ethernet Connection" section in
